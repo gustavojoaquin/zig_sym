@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Mutex = std.Thread.Mutex;
+const hash_map = std.hash_map;
 
 // const Kind =  @This();
 
@@ -35,97 +36,156 @@ pub const Kind = union(enum) {
         switch (self) {
             .matrix => |elem_ptr| {
                 elem_ptr.*.deinit(allocator);
-                allocator.destroy(@ptrCast(*Kind)@alignCast(elem_ptr));
+                // allocator.destroy(@ptrCast(*Kind)@alignCast(elem_ptr));
+                // const align_cast_elem = @alignCast(elem_ptr);
+                // const ptr_cast_elem = @ptrCast(align_cast_elem);
+                allocator.destroy(Kind, elem_ptr);
             },
-            .undefined,
-            .number, boolean => {},
+            .undefined, .number, .boolean => {},
         }
     }
 };
+
+const DispatchKey = struct {
+    tag1: std.meta.Tag(Kind),
+    tag2: std.meta.Tag(Kind),
+
+    pub fn hash(self: DispatchKey) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        std.hash.autoHash(&hasher, self.tag1);
+        std.hash.autoHash(&hasher, self.tag2);
+        return hasher.final();
+    }
+    pub fn eql(self: DispatchKey, other: DispatchKey) bool {
+        return self.tag1 == other.tag1 and self.tag2 == other.tag2;
+    }
+};
+
+pub const DispatchFn = fn (dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind;
+
+fn numberNumberDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
+    std.debug.assert(a == .number and b == .number);
+    _ = dispatcher;
+
+    return Kind.Number;
+}
+
+fn numberMatrixDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
+    std.debug.assert(a == .number and b == .matrix);
+
+    const b_elem_ptr = b.matrix;
+    const final_elem_kind = try dispatcher.dispatchBinary(a, b_elem_ptr.*);
+    const allocated_elem_ptr = try dispatcher.allocator.create(Kind);
+    errdefer dispatcher.allocator.destroy(allocated_elem_ptr);
+    allocated_elem_ptr.* = final_elem_kind;
+
+    return Kind{ .matrix = allocated_elem_ptr };
+}
+
+fn matrixMatrixDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
+    std.debug.assert(a == .matrix and b == .matrix);
+
+    const a_elem_ptr = a.matrix;
+    const b_elem_ptr = a.matrix;
+
+    const final_elem_kind = try dispatcher.dispatchBinary(a_elem_ptr.*, b_elem_ptr.*);
+
+    const allocated_elem_ptr = try dispatcher.allocator.create(Kind);
+    errdefer dispatcher.allocator.destroy(allocated_elem_ptr);
+
+    allocated_elem_ptr.* = final_elem_kind;
+
+    return Kind{ .matrix = allocated_elem_ptr };
+}
 
 pub const KindDispatcher = struct {
     name: []const u8,
     commutative: bool,
     allocator: Allocator,
 
+    rules: hash_map.AutoHashMap(DispatchKey, DispatchFn),
+
     pub fn init(allocator: Allocator, name: []const u8, commutative: bool) KindDispatcher {
         return .{
             .allocator = allocator,
             .name = name,
             .commutative = commutative,
+            .rules = hash_map.AutoHashMap(DispatchKey, DispatchFn).init(allocator),
         };
     }
 
-    pub fn dispatch(self: *KindDispatcher, kinds: []const Kind) Allocator.Error!Kind {
-        if (kinds.len == 0) return Kind.Undefined;
-
-        var result = kinds[0];
-        for (kinds[1..]) |kind| {
-            result = try self.dispatchBinary(result, kind);
-        }
-        return result;
+    pub fn deinit(self: KindDispatcher) void {
+        self.rules.deinit();
     }
 
-    pub fn dispatchBinary(self: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
-        if (self.commutative) {
-            const a_order = KindOrder(a);
-            const b_order = KindOrder(b);
+    /// Registers a dispatch function for a given pair of Kind tags.
+    /// If commutative, also registers the reversed pair.
+    pub fn register(self: *KindDispatcher, tag1: std.meta.Tag(Kind), tag2: std.meta.Tag(Kind), func: DispatchFn) !void {
+        const key = DispatchKey{ .tag1 = tag1, .tag2 = tag2 };
+        try self.rules.put(key, func);
 
-            if (a_order > b_order) {
-                return try self.dispatchBinary(b, a);
+        if (self.commutative and tag2 != tag2) {
+            const reversed_key = DispatchKey{ .tag1 = tag2, .tag2 = tag1 };
+            try self.rules.put(reversed_key, func);
+        }
+    }
+
+    /// Dispatches based on a list of kinds.
+    /// NOTE: The caller is responsible for calling .deinit() on the *returned* Kind
+    /// if it might contain allocated data (i.e., if it's a matrix resulting from dispatch).
+    pub fn dispatch(self: *KindDispatcher, kinds: []const Kind) Allocator.Error!Kind {
+        // if (kinds.len == 0) return Kind.Undefined;
+        //
+        // var result = kinds[0];
+        // for (kinds[1..]) |kind| {
+        //     result = try self.dispatchBinary(result, kind);
+        // }
+        // return result;
+
+        if (kinds.len == 0) return Kind.Undefined;
+        if (kinds.len == 1) return kinds[0];
+
+        var current_result = kinds[0];
+        var owns_current_result = false;
+
+        for (kinds[1..]) |next_kind| {
+            const next_result = try self.dispatchBinary(current_result, next_kind);
+            const own_next_result = (next_result == .matrix);
+
+            if (owns_current_result) {
+                var changed = true;
+                if (current_result == .matrix and next_result == .matrix) {
+                    const current_result_cast: u64 = @intCast(current_result.matrix);
+                    const next_result_cast: u64 = @intCast(next_result.matrix);
+                    if (current_result_cast == next_result_cast) {
+                        changed = false;
+                    }
+                }
+                if (changed) current_result.deinit(self.allocator);
+            }
+            current_result = next_result;
+            owns_current_result = own_next_result;
+        }
+        return current_result;
+    }
+    /// Performs binary dispatch using the registered rules.
+    /// Returns an allocated Kind if the registered function allocates.
+    pub fn dispatchBinary(self: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
+        const tag_a = @as(std.meta.Tag(Kind), a);
+        const tag_b = @as(std.meta.Tag(Kind), b);
+
+        const key = DispatchKey{ .tag1 = tag_a, .tag2 = tag_b };
+
+        if (self.rules.get(key)) |func| {
+            return func(self, a, b);
+        } else if (self.commutative and tag_a != tag_b) {
+            const reversed_key = DispatchKey{ .tag1 = tag_b, .tag2 = tag_a };
+            if (self.rules.get(reversed_key)) |func| {
+                return func(self, b, a);
             }
         }
 
-        return switch (a) {
-            .number => switch (b) {
-                .number => Kind.Number,
-                .matrix => |b_elem| {
-                    const elem_kind = try self.dispatchBinary(a, b_elem.*);
-                    _ = elem_kind; // autofix
-                    return Kind{ .matrix = try self.allocator.create(Kind) };
-                },
-                else => return Kind.Undefined,
-            },
-            .matrix => |a_elem| switch (b) {
-                .number => {
-                    const elem_kind = try self.dispatchBinary(a_elem.*, b);
-                    _ = elem_kind; // autofix
-                    return Kind{ .matrix = try self.allocator.create(Kind) };
-                },
-                .matrix => |b_elem| {
-                    const elem_kind = try self.dispatchBinary(a_elem.*, b_elem.*);
-                    _ = elem_kind; // autofix
-                    return Kind{ .matrix = try self.allocator.create(Kind) };
-                },
-                else => return Kind.Undefined,
-            },
-            else => return Kind.Undefined,
-        };
+        return Kind.Undefined;
     }
 };
 
-fn KindOrder(k: Kind) usize {
-    return switch (k) {
-        .undefined => 0,
-        .number => 1,
-        .boolean => 2,
-        .matrix => 3,
-    };
-}
-
-// test "Number * Number results in Number" {
-//     const allocator = std.testing.allocator;
-//     var dispatcher = KindDispatcher.init(allocator, "test", true);
-//     const result = try dispatcher.dispatch(&.{ Kind.Number, Kind.Number });
-//     std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-//     try std.testing.expect(Kind.equals(result, Kind.Number));
-// }
-//
-// test "Number * Matrix(Number) result in Matrix(Number)" {
-//     const allocator = std.testing.allocator;
-//     const elem = &Kind.Number;
-//     const matrix = Kind.Matrix(elem);
-//     var dispatcher = KindDispatcher.init(allocator, "test", true);
-//     const result = try dispatcher.dispatch(&.{ Kind.Number, matrix });
-//     try std.testing.expect(result == .matrix and Kind.equals(result.matrix.*, Kind.Number));
-// }
