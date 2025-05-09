@@ -13,6 +13,9 @@ fn createTestDispatcher(allocator: Allocator) !KindDispatcher {
     try dispatcher.register(.undefined, .boolean, &kind.undefinedDispatch);
     try dispatcher.register(.undefined, .matrix, &kind.undefinedDispatch);
     try dispatcher.register(.undefined, .undefined, &kind.undefinedDispatch);
+
+    try dispatcher.register(.boolean, .boolean, &kind.booleanBooleanDispatch); 
+    // try dispatcher.register(.number, .boolean, &kind.)
     return dispatcher;
 }
 
@@ -105,12 +108,32 @@ test "Number * Matrix(Matrix(Number)) results in Matrix(Matrix(Number))" {
 
 test "Unregistered dispatch results in Undefined" {
     const allocator = std.testing.allocator;
-    var dispathcer = KindDispatcher.init(allocator, "test", true);
+    var dispathcer = try createTestDispatcher(allocator);
     defer dispathcer.deinit();
 
     const result = try dispathcer.dispatch(&.{ Kind.Number, Kind.Boolean });
     defer result.deinit(allocator);
 
+    try std.testing.expect(result == .undefined);
+}
+
+test "Boolean * Boolean results in Boolean" {
+    const allocator = std.testing.allocator;
+    var dispatcher = try createTestDispatcher(allocator);
+    defer dispatcher.deinit();
+
+    const result = try dispatcher.dispatch(&.{ Kind.Boolean, Kind.Boolean });
+    defer result.deinit(allocator);
+    try std.testing.expect(result == .boolean);
+}
+
+test "Boolean * Number results in Undefined" {
+    const allocator = std.testing.allocator;
+    var dispatcher = try createTestDispatcher(allocator);
+    defer dispatcher.deinit();
+
+    const result = try dispatcher.dispatch(&.{ Kind.Boolean, Kind.Number});
+    defer result.deinit(allocator);
     try std.testing.expect(result == .undefined);
 }
 

@@ -109,6 +109,12 @@ pub fn matrixMatrixDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Alloc
     return Kind{ .matrix = allocated_elem_ptr };
 }
 
+pub fn booleanBooleanDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
+    std.debug.assert(a == .boolean and b == .boolean);
+    _ = dispatcher;
+    return Kind.Boolean;
+}
+
 pub const KindDispatcher = struct {
     name: []const u8,
     commutative: bool,
@@ -147,14 +153,6 @@ pub const KindDispatcher = struct {
     /// NOTE: The caller is responsible for calling .deinit() on the *returned* Kind
     /// if it might contain allocated data (i.e., if it's a matrix resulting from dispatch).
     pub fn dispatch(self: *KindDispatcher, kinds: []const Kind) Allocator.Error!Kind {
-        // if (kinds.len == 0) return Kind.Undefined;
-        //
-        // var result = kinds[0];
-        // for (kinds[1..]) |kind| {
-        //     result = try self.dispatchBinary(result, kind);
-        // }
-        // return result;
-
         if (kinds.len == 0) return Kind.Undefined;
 
         var current_result = kinds[0];
