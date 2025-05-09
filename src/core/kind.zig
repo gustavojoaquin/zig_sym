@@ -15,8 +15,11 @@ pub const Kind = union(enum) {
     pub const Number: Kind = .number;
     pub const Boolean: Kind = .boolean;
 
-    pub fn Matrix(element_kind: *const Kind) Kind {
-        return .{ .matrix = element_kind };
+    pub fn Matrix(allocator: Allocator, element_kind: Kind) !Kind {
+        // return .{ .matrix = element_kind };
+        const elem_ptr = try allocator.create(Kind);
+        elem_ptr.* = element_kind;
+        return .{ .matrix = elem_ptr };
     }
 
     pub fn equals(a: Kind, b: Kind) bool {
@@ -25,23 +28,24 @@ pub const Kind = union(enum) {
 
         if (tag_a != tag_b) return false;
         return switch (a) {
-            .matrix => |a_elem| {
-                if (b.matrix == null or a_elem == null) return a_elem == b.matrix;
-                return equals(a_elem.*, b.matrix.*);
-            },
-            else => return true,
+            // .matrix => |a_elem| {
+            //     if (b.matrix == null or a_elem == null) return a_elem == b.matrix;
+            //     return equals(a_elem.*, b.matrix.*);
+            // },
+            .matrix => |a_elem| a_elem.*.equals(b.matrix.*),
+            else => true,
         };
     }
     pub fn deinit(self: Kind, allocator: Allocator) void {
         switch (self) {
             .matrix => |elem_ptr| {
-                elem_ptr.*.deinit(allocator);
+                elem_ptr.deinit(allocator);
                 // allocator.destroy(@ptrCast(*Kind)@alignCast(elem_ptr));
                 // const align_cast_elem = @alignCast(elem_ptr);
                 // const ptr_cast_elem = @ptrCast(align_cast_elem);
-                allocator.destroy(Kind, elem_ptr);
+                allocator.destroy(elem_ptr);
             },
-            .undefined, .number, .boolean => {},
+            else => {},
         }
     }
 };
@@ -61,20 +65,20 @@ const DispatchKey = struct {
     }
 };
 
-pub const DispatchFn = fn (dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind;
+pub const DispatchFn = *const fn (dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind;
 
-fn numberNumberDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
+pub fn numberNumberDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
     std.debug.assert(a == .number and b == .number);
     _ = dispatcher;
 
     return Kind.Number;
 }
 
-fn numberMatrixDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
+pub fn numberMatrixDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
     std.debug.assert(a == .number and b == .matrix);
 
-    const b_elem_ptr = b.matrix;
-    const final_elem_kind = try dispatcher.dispatchBinary(a, b_elem_ptr.*);
+    const b_elem_ptr = b.matrix.*;
+    const final_elem_kind = try dispatcher.dispatchBinary(a, b_elem_ptr);
     const allocated_elem_ptr = try dispatcher.allocator.create(Kind);
     errdefer dispatcher.allocator.destroy(allocated_elem_ptr);
     allocated_elem_ptr.* = final_elem_kind;
@@ -82,13 +86,20 @@ fn numberMatrixDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator
     return Kind{ .matrix = allocated_elem_ptr };
 }
 
-fn matrixMatrixDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
+pub fn undefinedDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
+    _ = dispatcher;
+    _ = a;
+    _ = b;
+    return Kind.Undefined;
+}
+
+pub fn matrixMatrixDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
     std.debug.assert(a == .matrix and b == .matrix);
 
-    const a_elem_ptr = a.matrix;
-    const b_elem_ptr = a.matrix;
+    const a_elem_ptr = a.matrix.*;
+    const b_elem_ptr = a.matrix.*;
 
-    const final_elem_kind = try dispatcher.dispatchBinary(a_elem_ptr.*, b_elem_ptr.*);
+    const final_elem_kind = try dispatcher.dispatchBinary(a_elem_ptr, b_elem_ptr);
 
     const allocated_elem_ptr = try dispatcher.allocator.create(Kind);
     errdefer dispatcher.allocator.destroy(allocated_elem_ptr);
@@ -103,18 +114,20 @@ pub const KindDispatcher = struct {
     commutative: bool,
     allocator: Allocator,
 
-    rules: hash_map.AutoHashMap(DispatchKey, DispatchFn),
+    rules: hash_map.HashMap(DispatchKey, DispatchFn, hash_map.AutoContext(DispatchKey), 80),
 
     pub fn init(allocator: Allocator, name: []const u8, commutative: bool) KindDispatcher {
         return .{
             .allocator = allocator,
             .name = name,
             .commutative = commutative,
-            .rules = hash_map.AutoHashMap(DispatchKey, DispatchFn).init(allocator),
+            .rules = hash_map.HashMap(DispatchKey, DispatchFn, hash_map.AutoContext(DispatchKey), 80).init(allocator),
         };
     }
 
-    pub fn deinit(self: KindDispatcher) void {
+    pub fn deinit(self: *KindDispatcher) void {
+        // var cast_self_rules = @constCast(&self.rules);
+        // cast_self_rules.deinit();
         self.rules.deinit();
     }
 
@@ -143,7 +156,6 @@ pub const KindDispatcher = struct {
         // return result;
 
         if (kinds.len == 0) return Kind.Undefined;
-        if (kinds.len == 1) return kinds[0];
 
         var current_result = kinds[0];
         var owns_current_result = false;
@@ -153,15 +165,12 @@ pub const KindDispatcher = struct {
             const own_next_result = (next_result == .matrix);
 
             if (owns_current_result) {
-                var changed = true;
                 if (current_result == .matrix and next_result == .matrix) {
-                    const current_result_cast: u64 = @intCast(current_result.matrix);
-                    const next_result_cast: u64 = @intCast(next_result.matrix);
-                    if (current_result_cast == next_result_cast) {
-                        changed = false;
-                    }
+                    const changed = !current_result.matrix.*.equals(next_result);
+                    if (changed) current_result.deinit(self.allocator);
+                } else {
+                    current_result.deinit(self.allocator);
                 }
-                if (changed) current_result.deinit(self.allocator);
             }
             current_result = next_result;
             owns_current_result = own_next_result;
@@ -178,7 +187,7 @@ pub const KindDispatcher = struct {
 
         if (self.rules.get(key)) |func| {
             return func(self, a, b);
-        } else if (self.commutative and tag_a != tag_b) {
+        } else if (self.commutative) {
             const reversed_key = DispatchKey{ .tag1 = tag_b, .tag2 = tag_a };
             if (self.rules.get(reversed_key)) |func| {
                 return func(self, b, a);
@@ -188,4 +197,3 @@ pub const KindDispatcher = struct {
         return Kind.Undefined;
     }
 };
-

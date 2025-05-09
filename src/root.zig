@@ -16,6 +16,6 @@ test "basic add functionality" {
     try testing.expect(add(3, 7) == 10);
 }
 
-test {
+test "Kind test" {
     @import("std").testing.refAllDecls(@This());
 }
