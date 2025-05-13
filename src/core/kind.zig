@@ -114,6 +114,23 @@ pub fn booleanBooleanDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) All
     _ = dispatcher;
     return Kind.Boolean;
 }
+pub fn booleanMatrixDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
+    std.debug.assert(a == .boolean and b == .matrix);
+    const b_elem_ptr = b.matrix;
+    const final_elem_kind = try dispatcher.dispatchBinary(a, b_elem_ptr.*);
+
+    const allocated_elem_ptr = try dispatcher.allocator.create(Kind);
+    errdefer dispatcher.allocator.destroy(allocated_elem_ptr);
+    allocated_elem_ptr.* = final_elem_kind;
+
+    return Kind{ .matrix = allocated_elem_ptr };
+}
+
+pub fn matrixBooleanDispatch(dispatcher: *KindDispatcher, a: Kind, b: Kind) Allocator.Error!Kind {
+    std.debug.assert(a == .matrix and b == .boolean);
+    // Just reuse the same logic as booleanMatrixDispatch
+    return booleanMatrixDispatch(dispatcher, b, a);
+}
 
 pub const KindDispatcher = struct {
     name: []const u8,
