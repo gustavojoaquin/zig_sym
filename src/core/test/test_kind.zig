@@ -189,11 +189,3 @@ test "Boolean * Matrix(Undefined) results in Matrix(Undefined)" {
     try std.testing.expect(result.matrix.* == .undefined);
 }
 
-// test "Number * Matrix(Number) result in Matrix(Number)" {
-//     const allocator = std.testing.allocator;
-//     const elem = &kind.Kind.Number;
-//     const matrix = kind.Kind.Matrix(elem);
-//     var dispatcher = kind.KindDispatcher.init(allocator, "test", true);
-//     const result = try dispatcher.dispatch(&.{ kind.Kind.Number, matrix });
-//     try std.testing.expect(result == .matrix and kind.Kind.equals(result.matrix.*, kind.Kind.Number));
-// }
