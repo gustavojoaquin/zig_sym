@@ -402,7 +402,11 @@ pub fn recursiveFree(allocator: Allocator, node: *const LogicNode) void {
         .True, .False => {},
         .Symbol => allocator.free(node.Symbol),
         .Not => allocator.destroy(node),
-        .And, .Or => |compound| {
+        .And => |compound| {
+            allocator.free(compound.args);
+            allocator.destroy(node);
+        },
+        .Or => |compound| {
             allocator.free(compound.args);
             allocator.destroy(node);
         },
@@ -431,10 +435,17 @@ pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) !*const L
     defer flattened_list.deinit();
 
     for (args) |arg| {
-        try flattenAndOr(allocator, arg, .{ .And = {} } , &flattened_list);
+        const empty_and = LogicNode{
+            .And = .{
+                .args = &.{},
+            },
+        };
+        // const create_and = try allocator.create(LogicNode);
+        // create_and = .{ .And = {} };
+        try flattenAndOr(allocator, arg, empty_and, &flattened_list);
     }
 
-    var unique_map = std.AutoArrayHashMap(*const LogicNode, void, LogicNode.NodeContext, true).init(allocator);
+    var unique_map = std.AutoArrayHashMap(*const LogicNode, LogicNode.NodeContext).init(allocator);
     defer unique_map.deinit();
 
     for (flattened_list.items) |arg| {
@@ -463,7 +474,7 @@ pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) !*const L
             }
             return &FalseNode;
         }
-        try unique_map.put(arg, {});
+        try unique_map.put(arg, .{});
     }
 
     const unique_args = unique_map.keys();
@@ -507,7 +518,12 @@ pub fn createOr(allocator: Allocator, args: []const *const LogicNode) !*const Lo
     defer flattened_list.deinit();
 
     for (args) |arg| {
-        try flattenAndOr(allocator, arg, .Or, &flattened_list);
+        const empty_or = LogicNode{
+            .Or = .{
+                .args = &.{},
+            },
+        };
+        try flattenAndOr(allocator, arg, empty_or, &flattened_list);
     }
 
     var unique_map = std.AutoArrayHashMap(*const LogicNode, LogicNode.NodeContext).init(allocator);
@@ -568,7 +584,7 @@ pub fn createOr(allocator: Allocator, args: []const *const LogicNode) !*const Lo
 ///     unless it is one of the global singletons (TrueNode, FalseNode) or
 ///     a direct reference to the original node's child (as in !!X -> X).
 ///     The caller should use recursiveFree if it determines the returned node is owned.
-pub fn createNot(allocator: Allocator, arg: *const LogicNode) !*const LogicNode {
+pub fn createNot(allocator: Allocator, arg: *const LogicNode) Allocator.Error!*const LogicNode {
     return switch (arg.*) {
         .True => return &FalseNode,
         .False => return &TrueNode,
