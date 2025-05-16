@@ -3,6 +3,8 @@ const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 const Order = std.math.Order;
 
+const LogicError = error{ InvalidArguments, CustomAllocationFailure };
+
 /// Represents a fuzzy boolean value: True, False, or Unknown (null).
 pub const FuzzyBool = ?bool;
 
@@ -282,8 +284,12 @@ pub const LogicNode = union(enum) {
         // node.* = .{ .Symbol = name };
         // return node;
     }
-    /// Helper for std.sort to compare nodes structurally.
+
+    /// Performs a structural comparison between two LogicNodes.
+    /// Needed for equality checks in HashMaps and canonical sorting.
+    /// Returns .lt if a < b, .gt if a > b, .eq if a == b.
     fn compareNodes(_: void, a: *const LogicNode, b: *const LogicNode) Order {
+        if (a == b) return .eq;
         const tag_order = std.math.order(@intFromEnum(a.*), @intFromEnum(b.*));
 
         if (tag_order != .eq) return tag_order;
@@ -291,13 +297,13 @@ pub const LogicNode = union(enum) {
         return switch (a.*) {
             .True, .False => .eq,
             .Symbol => |s1| std.mem.order(u8, s1, b.Symbol),
-            .Not => compareNodes(null, a.Not, b.Not),
+            .Not => compareNodes({}, a.Not, b.Not),
             .And => |a_and| {
                 const b_and = b.And;
-                const len_order = std.math.order(a_and.arg.len, b_and.arg.len);
+                const len_order = std.math.order(a_and.args.len, b_and.args.len);
                 if (len_order != .eq) return len_order;
                 for (a_and.args, 0..) |arg_a, i| {
-                    const arg_order = compareNodes(null, arg_a, b_and.args[i]);
+                    const arg_order = compareNodes({}, arg_a, b_and.args[i]);
                     if (arg_order != .eq) return arg_order;
                 }
                 return .eq;
@@ -307,46 +313,20 @@ pub const LogicNode = union(enum) {
                 const len_order = std.math.order(a_or.args.len, b_or.args.len);
                 if (len_order != .eq) return len_order;
                 for (a_or.args, 0..) |arg_a, i| {
-                    const arg_order = compareNodes(null, arg_a, b_or.args[i]);
+                    const arg_order = compareNodes({}, arg_a, b_or.args[i]);
                     if (arg_order != .eq) return arg_order;
                 }
                 return .eq;
             },
         };
     }
-    // pub fn compareNodes(lhs: *const LogicNode, rhs: *const LogicNode) std.math.Order {
-    //     if (@intFromEnum(lhs.*) < @intFromEnum(rhs.*)) return .lt;
-    //     if (@intFromEnum(lhs.*) > @intFromEnum(rhs.*)) return .gt;
-    //
-    //     return switch (lhs.*) {
-    //         .True, .False => .eq,
-    //         .Symbol => |s1| std.mem.order(u8, s1, rhs.Symbol),
-    //         .Not => |n1| compareNodes(n1, rhs.Not),
-    //         .And => |a1| {
-    //             if (a1.args.len < rhs.And.args.len) return .lt;
-    //             if (a1.args.len > rhs.And.args.len) return .gt;
-    //
-    //             for (a1.args, 0..) |arg1, i| {
-    //                 const ord = compareNodes(arg1, rhs.And.args[i]);
-    //                 if (ord != .eq) return ord;
-    //             }
-    //             return .eq;
-    //         },
-    //         .Or => |o1| {
-    //             if (o1.args.len < rhs.Or.args.len) return .lt;
-    //             if (o1.args.len > rhs.Or.args.len) return .gt;
-    //
-    //             for (o1.args, 0..) |arg1, i| {
-    //                 const ord = compareNodes(arg1, rhs.Or.args[i]);
-    //                 if (ord != .eq) return ord;
-    //             }
-    //             return .eq;
-    //         },
-    //     };
-    //     // return std.hash_map.hashString(try a.toString()) < std.hash_map.hashString(try b.toString());
-    // }
-    //
 
+    /// Adapter function for sorting functions like std.mem.sort that require a
+    /// boolean "less than" comparator.
+    /// Returns true if lhs is strictly less than rhs, false otherwise.
+    fn lessThanNodes(context: void, lhs: *const LogicNode, rhs: *const LogicNode) bool {
+        return compareNodes(context, lhs, rhs) == .lt;
+    }
     /// Converts the LogicNode to a string representation.
     /// Allocates memory for the string using the provided allocator.
     pub fn toString(self: *const LogicNode, allocator: Allocator) ![]const u8 {
@@ -430,7 +410,7 @@ pub fn recursiveFree(allocator: Allocator, node: *const LogicNode) void {
 /// Returns:
 ///     A pointer to the resulting LogicNode. This node is owned by the caller
 ///     unless it is one of the global singletons (TrueNode, FalseNode).
-pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) !*const LogicNode {
+pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure }!*const LogicNode {
     var flattened_list = std.ArrayList(*const LogicNode).init(allocator);
     defer flattened_list.deinit();
 
@@ -485,15 +465,16 @@ pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) !*const L
     defer sorter_args_list.deinit();
     try sorter_args_list.appendSlice(unique_args);
 
-    std.mem.sort(*const LogicNode, sorter_args_list.items, {}, LogicNode.compareNodes);
+    std.mem.sort(*const LogicNode, sorter_args_list.items, {}, LogicNode.lessThanNodes);
 
-    const final_args_slice = try allocator.dupe(*const LogicNode, sorter_args_list);
+    const final_args_slice = try allocator.dupe(*const LogicNode, sorter_args_list.items);
     errdefer allocator.free(final_args_slice);
 
     const node = try allocator.create(LogicNode);
     errdefer allocator.destroy(node);
 
     node.* = .{ .And = .{ .args = final_args_slice } };
+    return node;
 }
 
 /// Creates an Or node, applying simplification and flattening rules.
@@ -513,7 +494,7 @@ pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) !*const L
 /// Returns:
 ///     A pointer to the resulting LogicNode. This node is owned by the caller
 ///     unless it is one of the global singletons (TrueNode, FalseNode).
-pub fn createOr(allocator: Allocator, args: []const *const LogicNode) !*const LogicNode {
+pub fn createOr(allocator: Allocator, args: []const *const LogicNode) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure }!*const LogicNode {
     var flattened_list = std.ArrayList(*const LogicNode).init(allocator);
     defer flattened_list.deinit();
 
@@ -546,7 +527,7 @@ pub fn createOr(allocator: Allocator, args: []const *const LogicNode) !*const Lo
             if (not_arg_is_newly_allocated) recursiveFree(allocator, not_arg);
             return &TrueNode;
         }
-        try unique_map.put(arg, {});
+        try unique_map.put(arg, .{});
     }
 
     const unique_args = unique_map.keys();
@@ -557,7 +538,7 @@ pub fn createOr(allocator: Allocator, args: []const *const LogicNode) !*const Lo
     defer sorted_args_list.deinit();
     try sorted_args_list.appendSlice(unique_args);
 
-    std.mem.sort(*const LogicNode, sorted_args_list.items, {}, LogicNode.compareNodes);
+    std.mem.sort(*const LogicNode, sorted_args_list.items, {}, LogicNode.lessThanNodes);
 
     const final_args_slice = try allocator.dupe(*const LogicNode, sorted_args_list.items);
     errdefer allocator.free(final_args_slice);
@@ -566,6 +547,7 @@ pub fn createOr(allocator: Allocator, args: []const *const LogicNode) !*const Lo
     errdefer allocator.destroy(node);
 
     node.* = .{ .Or = .{ .args = final_args_slice } };
+    return node;
 }
 
 /// Creates a Not node, applying simplification rules.
@@ -584,7 +566,7 @@ pub fn createOr(allocator: Allocator, args: []const *const LogicNode) !*const Lo
 ///     unless it is one of the global singletons (TrueNode, FalseNode) or
 ///     a direct reference to the original node's child (as in !!X -> X).
 ///     The caller should use recursiveFree if it determines the returned node is owned.
-pub fn createNot(allocator: Allocator, arg: *const LogicNode) Allocator.Error!*const LogicNode {
+pub fn createNot(allocator: Allocator, arg: *const LogicNode) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure }!*const LogicNode {
     return switch (arg.*) {
         .True => return &FalseNode,
         .False => return &TrueNode,
@@ -621,7 +603,7 @@ pub fn createNot(allocator: Allocator, arg: *const LogicNode) Allocator.Error!*c
 
 /// Helper to recursively flatten And/Or nodes of the target type.
 /// Adds non-matching nodes or flattened children to the result list.
-fn flattenAndOr(allocator: Allocator, node: *const LogicNode, target_tag: LogicNode, result_list: *std.ArrayList(*const LogicNode)) !void {
+fn flattenAndOr(allocator: Allocator, node: *const LogicNode, target_tag: LogicNode, result_list: *std.ArrayList(*const LogicNode)) error{OutOfMemory}!void {
     switch (node.*) {
         .And => |and_node| {
             if (target_tag == .And) {
