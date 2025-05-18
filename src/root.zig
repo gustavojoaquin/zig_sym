@@ -8,8 +8,8 @@ pub export fn add(a: i32, b: i32) i32 {
     return a + b;
 }
 pub const Kind = @import("core/kind.zig");
-pub const Basic = @import("core/basic.zig");
-// const test_kind = @import("core/test/test_kind.zig");
+// pub const Basic = @import("core/basic.zig");
+// pub const test_kind = @import("core/test/test_kind.zig");
 pub const test_kind = @import("core/test/test_kind.zig");
 
 pub const logic = @import("core/logic.zig");

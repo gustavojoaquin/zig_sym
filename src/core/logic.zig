@@ -276,13 +276,10 @@ pub const LogicNode = union(enum) {
     pub fn createSymbol(allocator: Allocator, name: []const u8) !*const LogicNode {
         const name_copy = try allocator.dupe(u8, name);
         const node = try allocator.create(LogicNode);
-        errdefer allocator.destroy(node);
         errdefer allocator.free(name_copy);
+        errdefer allocator.destroy(node);
         node.* = .{ .Symbol = name_copy };
         return node;
-        // const node = try allocator.create(LogicNode);
-        // node.* = .{ .Symbol = name };
-        // return node;
     }
 
     /// Performs a structural comparison between two LogicNodes.
@@ -377,10 +374,15 @@ pub const LogicNode = union(enum) {
 /// This helper is simplistic and ASSUMES exclusive ownership of children.
 /// Calling this on nodes with shared children (common in symbolic logic)
 /// will lead to double frees. Use with caution, ideally with an arena allocator.
-pub fn recursiveFree(allocator: Allocator, node: *const LogicNode) void {
+pub fn freeNode(allocator: Allocator, node: *const LogicNode) void {
+    if (node == &FalseNode or node == &TrueNode) return;
+
     switch (node.*) {
-        .True, .False => {},
-        .Symbol => allocator.free(node.Symbol),
+        .True, .False => unreachable,
+        .Symbol => {
+            allocator.free(node.Symbol);
+            allocator.destroy(node);
+        },
         .Not => allocator.destroy(node),
         .And => |compound| {
             allocator.free(compound.args);
@@ -439,20 +441,21 @@ pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) error{ Ou
         if (unique_map.get(arg) != null) continue;
 
         const not_arg = try createNot(allocator, arg);
-        const not_arg_is_newly_allocated = switch (not_arg.*) {
-            .True, .False => false,
-            .Not => not_arg.Not != arg,
-            else => true,
-        };
+        const not_arg_was_newly_allocated = !(not_arg == &TrueNode or not_arg == &FalseNode or (arg.* == .Not and not_arg == arg.Not));
+        // const not_arg_is_newly_allocated = switch (not_arg.*) {
+        //     .True, .False => false,
+        //     .Not => not_arg.Not != arg,
+        //     else => true,
+        // };
 
         if (unique_map.contains(not_arg)) {
-            if (not_arg_is_newly_allocated) {
-                recursiveFree(allocator, not_arg);
-                // WARNING: This recursiveFree is UNSAFE if nodes are shared.
-                // A robust system needs a visited set or different memory model.
-                // Leaving it out for now and documenting the potential leak/double-free.
+            if (not_arg_was_newly_allocated) {
+                freeNode(allocator, not_arg);
             }
             return &FalseNode;
+        }
+        if (not_arg_was_newly_allocated) {
+            freeNode(allocator, not_arg);
         }
         try unique_map.put(arg, .{});
     }
@@ -517,15 +520,19 @@ pub fn createOr(allocator: Allocator, args: []const *const LogicNode) error{ Out
         if (unique_map.get(arg) != null) continue;
 
         const not_arg = try createNot(allocator, arg);
-        const not_arg_is_newly_allocated = switch (not_arg.*) {
-            .True, .False => false,
-            .Not => not_arg.Not != arg,
-            else => true,
-        };
+        const not_arg_was_newly_allocated = !(not_arg == &TrueNode or not_arg == &FalseNode or (arg.* == .Not and not_arg == arg.Not));
+        // const not_arg_is_newly_allocated = switch (not_arg.*) {
+        //     .True, .False => false,
+        //     .Not => not_arg.Not != arg,
+        //     else => true,
+        // };
 
         if (unique_map.contains(not_arg)) {
-            if (not_arg_is_newly_allocated) recursiveFree(allocator, not_arg);
+            if (not_arg_was_newly_allocated) freeNode(allocator, not_arg);
             return &TrueNode;
+        }
+        if (not_arg_was_newly_allocated) {
+            freeNode(allocator, not_arg);
         }
         try unique_map.put(arg, .{});
     }
@@ -570,7 +577,11 @@ pub fn createNot(allocator: Allocator, arg: *const LogicNode) error{ OutOfMemory
     return switch (arg.*) {
         .True => return &FalseNode,
         .False => return &TrueNode,
-        .Not => return arg.Not,
+        .Not => {
+            const child = arg.Not;
+            freeNode(allocator, arg);
+            return child;
+        },
         .And => |args| {
             var new_args_list = std.ArrayList(*const LogicNode).init(allocator);
             defer new_args_list.deinit();
