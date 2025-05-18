@@ -205,7 +205,7 @@ pub const LogicNode = union(enum) {
     /// Performs a structural comparison between two LogicNodes.
     /// Needed for sorting and equality checks in HashMaps.
     fn eqlNodes(a: *const LogicNode, b: *const LogicNode) bool {
-        if (a == b) return false;
+        if (a == b) return true;
 
         const tag_a = a.*;
         const tag_b = b.*;
@@ -213,7 +213,7 @@ pub const LogicNode = union(enum) {
 
         return switch (tag_a) {
             .True, .False => true,
-            .Symbol => |s_a| eql(LogicNode, s_a, b.Symbol),
+            .Symbol => |s_a| eql(u8, s_a, b.Symbol),
             .Not => eqlNodes(a.Not, b.Not),
             .And => |a_and| {
                 const b_and = b.And;
@@ -227,7 +227,7 @@ pub const LogicNode = union(enum) {
                 const b_or = b.Or;
 
                 if (a_or.args.len != b_or.args.len) return false;
-                for (a_or, 0..) |arg_a, i| {
+                for (a_or.args, 0..) |arg_a, i| {
                     if (!eqlNodes(arg_a, b_or.args[i])) return false;
                 }
                 return true;
@@ -269,18 +269,6 @@ pub const LogicNode = union(enum) {
             return eqlNodes(a, b);
         }
     };
-
-    /// Creates a Symbol node.
-    /// Allocates memory for the node and duplicates the symbol name.
-    /// The caller is responsible for freeing the returned node using recursiveFree.
-    pub fn createSymbol(allocator: Allocator, name: []const u8) !*const LogicNode {
-        const name_copy = try allocator.dupe(u8, name);
-        const node = try allocator.create(LogicNode);
-        errdefer allocator.free(name_copy);
-        errdefer allocator.destroy(node);
-        node.* = .{ .Symbol = name_copy };
-        return node;
-    }
 
     /// Performs a structural comparison between two LogicNodes.
     /// Needed for equality checks in HashMaps and canonical sorting.
@@ -368,7 +356,170 @@ pub const LogicNode = union(enum) {
             },
         };
     }
+
+    /// Applies the distributive property: (A | B) & C -> (A & C) | (B & C).
+    /// This method is recursive and tries to push ORs up past ANDs.
+    /// For other node types (Or, Not, Symbol, True, False), it returns the node itself.
+    ///
+    /// Args:
+    ///     allocator: The allocator to use for creating new nodes.
+    ///
+    /// Returns:
+    ///     A pointer to the resulting LogicNode. This node is owned by the caller
+    ///     unless it is the original node or a global singleton.
+    pub fn expand(self: *const LogicNode, allocator: Allocator) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure, InvalidSyntax }!*const LogicNode {
+        return switch (self.*) {
+            .Or, .Not, .Symbol, .True, .False => self,
+            .And => |and_node| {
+                var or_arg_index: ?usize = null;
+                var or_node_to_distribute: ?*const LogicNode = null;
+
+                for (and_node.args, 0..) |arg, i| {
+                    const expanded_arg = try arg.expand(allocator);
+
+                    if (expanded_arg.* == .Or) {
+                        or_arg_index = i;
+                        or_node_to_distribute = expanded_arg;
+                        break;
+                    }
+                }
+
+                if (or_node_to_distribute) |or_node| {
+                    const or_index = or_arg_index.?;
+                    var rest_arg_list = std.ArrayList(*const LogicNode).init(allocator);
+                    defer rest_arg_list.deinit();
+
+                    for (and_node.args, 0..) |arg, i| {
+                        if (i != or_index) try rest_arg_list.append(arg);
+                    }
+
+                    var distributed_or_args_list = std.ArrayList(*const LogicNode).init(allocator);
+                    defer distributed_or_args_list.deinit();
+
+                    for (or_node.Or.args) |or_term| {
+                        var new_and_arg_term_list = std.ArrayList(*const LogicNode).init(allocator);
+                        defer new_and_arg_term_list.deinit();
+
+                        try new_and_arg_term_list.append(or_term);
+                        try new_and_arg_term_list.appendSlice(rest_arg_list.items);
+
+                        const new_and_node = try createAnd(allocator, new_and_arg_term_list.items);
+                        const expanded_new_and = try new_and_node.expand(allocator);
+
+                        try distributed_or_args_list.append(expanded_new_and);
+                    }
+                    const final_or_node = try createOr(allocator, distributed_or_args_list.items);
+                    return final_or_node;
+                } else {
+                    var expanded_args = std.ArrayList(*const LogicNode).init(allocator);
+                    defer expanded_args.deinit();
+
+                    var changed = false;
+                    for (and_node.args) |arg| {
+                        const expanded_arg = try arg.expand(allocator);
+                        if (expanded_arg != arg) changed = true;
+                        try expanded_args.append(expanded_arg);
+
+                        if (changed) {
+                            const result = try createAnd(allocator, expanded_args.items);
+                            return result;
+                        } else {
+                            return self;
+                        }
+                    }
+                }
+            },
+        };
+    }
 };
+/// Parses a logic expression string.
+///
+/// Accepts a simple format like `!a & b | c` with spaces around `&` and `|`,
+/// and no space after `!`. Follows left-to-right operator precedence.
+///
+/// Args:
+///     allocator: The allocator to use for creating nodes.
+///     text: The input string.
+///
+/// Returns:
+///     A pointer to the resulting LogicNode. The caller is responsible for freeing
+///     this node using `freeNode`. Returns an error if parsing fails.
+pub fn fromString(allocator: Allocator, text: []const u8) error{ OutOfMemory, InvalidSyntax, CustomAllocationFailure, InvalidArguments }!*const LogicNode {
+    var tokens = std.mem.tokenizeAny(*[]const u8, text, " ");
+    var lexpr: ?*const LogicNode = null;
+    var schedop: ?enum { And, Or } = null;
+
+    for (tokens.next()) |token| {
+        if (eql(u8, token, '&')) {
+            if (schedop) return error.InvalidSyntax;
+            if (lexpr == null) return error.InvalidSyntax;
+            schedop = .And;
+        } else if (eql(u8, token, '|')) {
+            if (schedop) return error.InvalidSyntax;
+            if (lexpr == null) return error.InvalidSyntax;
+            schedop = .Or;
+        } else if (token[0] == '!') {
+            if (token.len == 1) return error.InvalidSyntax;
+            const symbol_name = token[1..];
+            const symbol_node = try LogicNode.createSymbol(allocator, symbol_name);
+            errdefer freeNode(allocator, symbol_node);
+
+            const not_node = try createNot(allocator, symbol_node);
+            const not_node_is_owned = switch (not_node.*) {
+                .True, .False => false,
+                .Not => not_node.Not != symbol_node,
+                else => true,
+            };
+
+            if (schedop) |op| {
+                if (lexpr == null) return error.InvalidSyntax;
+                var new_expr: ?*const LogicNode = null;
+                if (op == .And) {
+                    const args = [_]*const LogicNode{ lexpr.?, not_node };
+                    new_expr = try createAnd(allocator, &args);
+                } else {
+                    const args = [_]*const LogicNode{ lexpr.?, not_node };
+                    new_expr = try createOr(allocator, &args);
+                }
+
+                lexpr = new_expr;
+                schedop = null;
+
+                if (not_node_is_owned) freeNode(allocator, not_node);
+            } else {
+                if (lexpr) return error.InvalidSyntax;
+                lexpr = not_node;
+            }
+        } else {
+            const symbol_name = token;
+            const symbol_node = try createSymbol(allocator, symbol_name);
+
+            if (schedop) |op| {
+                if (lexpr == null) return error.InvalidSyntax;
+
+                var new_expr: ?*const LogicNode = null;
+                if (op == .And) {
+                    const args = [_]*const LogicNode{ lexpr.?, symbol_node };
+                    new_expr = try createAnd(allocator, &args);
+                } else {
+                    const args = [_]*const LogicNode{ lexpr.?, symbol_node };
+                    new_expr = try createOr(allocator, &args);
+                }
+
+                lexpr = new_expr;
+                schedop = null;
+            } else {
+                if (lexpr) return error.InvalidSyntax;
+                lexpr = symbol_node;
+            }
+        }
+    }
+
+    if (schedop) return error.InvalidSyntax;
+    if (lexpr == null) return error.InvalidSyntax;
+
+    return lexpr.?;
+}
 
 /// Recursively frees the memory owned by a LogicNode and its children.
 /// This helper is simplistic and ASSUMES exclusive ownership of children.
@@ -636,4 +787,16 @@ fn flattenAndOr(allocator: Allocator, node: *const LogicNode, target_tag: LogicN
         },
         else => try result_list.append(node),
     }
+}
+
+/// Creates a Symbol node.
+/// Allocates memory for the node and duplicates the symbol name.
+/// The caller is responsible for freeing the returned node using recursiveFree.
+pub fn createSymbol(allocator: Allocator, name: []const u8) !*const LogicNode {
+    const name_copy = try allocator.dupe(u8, name);
+    const node = try allocator.create(LogicNode);
+    errdefer allocator.free(name_copy);
+    errdefer allocator.destroy(node);
+    node.* = .{ .Symbol = name_copy };
+    return node;
 }
