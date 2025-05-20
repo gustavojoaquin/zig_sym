@@ -572,8 +572,8 @@ pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) error{ Ou
         try flattenAndOr(allocator, arg, &empty_and, &flattened_list);
     }
 
-    var unique_map = std.AutoArrayHashMap(*const LogicNode, LogicNode.NodeContext).init(allocator);
-    defer unique_map.deinit();
+    var unique_map = std.HashMapUnmanaged(*const LogicNode, void, LogicNode.NodeContext, std.hash_map.default_max_load_percentage){};
+    defer unique_map.deinit(allocator);
 
     for (flattened_list.items) |arg| {
         switch (arg.*) {
@@ -586,34 +586,45 @@ pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) error{ Ou
             else => {},
         }
 
-        const not_arg = try createNot(allocator, arg);
-        errdefer freeNode(allocator, not_arg);
+        const not_arg_for_check = try createNot(allocator, arg);
+        var free_this_not_arg_for_check = false;
 
-        if (unique_map.contains(not_arg)) {
+        if (arg.* != .Not) {
+            if (not_arg_for_check.* != .True and not_arg_for_check.* != .False) {
+                free_this_not_arg_for_check = true;
+            }
+        }
+
+        errdefer if (free_this_not_arg_for_check) freeNode(allocator, not_arg_for_check);
+
+        if (unique_map.contains(not_arg_for_check)) {
+            if (free_this_not_arg_for_check) freeNode(allocator, not_arg_for_check);
             return try createFalse(allocator);
         }
 
-        try unique_map.put(arg, .{});
+        if (!unique_map.contains(arg)) {
+            try unique_map.put(allocator, arg, {});
+        }
 
-        freeNode(allocator, not_arg);
+        if (free_this_not_arg_for_check) freeNode(allocator, not_arg_for_check);
     }
 
-    const unique_args = unique_map.keys();
-    if (unique_args.len == 0) return try createTrue(allocator);
-    if (unique_args.len == 1) return unique_args[0];
+    var unique_args_list = std.ArrayList(*const LogicNode).init(allocator);
+    defer unique_args_list.deinit();
+    var it = unique_map.iterator();
+    while (it.next()) |entry| {
+        try unique_args_list.append(entry.key_ptr.*);
+    }
 
-    var sorted_args_list = std.ArrayList(*const LogicNode).init(allocator);
-    defer sorted_args_list.deinit();
-    try sorted_args_list.appendSlice(unique_args);
+    if (unique_args_list.items.len == 0) return try createTrue(allocator);
+    if (unique_args_list.items.len == 1) return unique_args_list.items[0];
 
-    std.mem.sort(*const LogicNode, sorted_args_list.items, {}, LogicNode.lessThanNodes);
+    std.mem.sort(*const LogicNode, unique_args_list.items, {}, LogicNode.lessThanNodes);
 
-    const final_args_slice = try allocator.dupe(*const LogicNode, sorted_args_list.items);
+    const final_args_slice = try allocator.dupe(*const LogicNode, unique_args_list.items);
     errdefer allocator.free(final_args_slice);
 
     const node = try allocator.create(LogicNode);
-    errdefer allocator.destroy(node);
-
     node.* = .{ .And = .{ .args = final_args_slice } };
     return node;
 }
@@ -648,8 +659,8 @@ pub fn createOr(allocator: Allocator, args: []const *const LogicNode) error{ Out
         try flattenAndOr(allocator, arg, &empty_or, &flattened_list);
     }
 
-    var unique_map = std.AutoArrayHashMap(*const LogicNode, LogicNode.NodeContext).init(allocator);
-    defer unique_map.deinit();
+    var unique_map = std.HashMapUnmanaged(*const LogicNode, void, LogicNode.NodeContext, std.hash_map.default_max_load_percentage){};
+    defer unique_map.deinit(allocator);
 
     for (flattened_list.items) |arg| {
         switch (arg.*) {
@@ -662,33 +673,39 @@ pub fn createOr(allocator: Allocator, args: []const *const LogicNode) error{ Out
             else => {},
         }
 
-        const not_arg = try createNot(allocator, arg);
-        errdefer freeNode(allocator, arg);
+        const not_arg_for_check = try createNot(allocator, arg);
+        var free_this_not_arg_for_check = false;
 
-        if (unique_map.contains(not_arg)) {
+        if (arg.* != .Not) {
+            if (not_arg_for_check.* != .True and not_arg_for_check.* != .False) {
+                free_this_not_arg_for_check = true;
+            }
+        }
+
+        if (unique_map.contains(not_arg_for_check)) {
+            if (free_this_not_arg_for_check) freeNode(allocator, not_arg_for_check);
             return try createTrue(allocator);
         }
-        try unique_map.put(arg, .{});
 
-        freeNode(allocator, not_arg);
+        if (!unique_map.contains(arg)) try unique_map.put(allocator, arg, {});
+        if (free_this_not_arg_for_check) freeNode(allocator, not_arg_for_check);
     }
 
-    const unique_args = unique_map.keys();
-    if (unique_args.len == 0) return try createFalse(allocator);
-    if (unique_args.len == 1) return unique_args[0];
+    var unique_args_list = std.ArrayList(*const LogicNode).init(allocator);
+    defer unique_args_list.deinit();
+    var it = unique_map.iterator();
+    while (it.next()) |entry| {
+        try unique_args_list.append(entry.key_ptr.*);
+    }
 
-    var sorted_args_list = std.ArrayList(*const LogicNode).init(allocator);
-    defer sorted_args_list.deinit();
-    try sorted_args_list.appendSlice(unique_args);
+    if (unique_args_list.items.len == 0) return try createFalse(allocator);
+    if (unique_args_list.items.len == 1) return unique_args_list.items[0];
+    std.mem.sort(*const LogicNode, unique_args_list.items, {}, LogicNode.lessThanNodes);
 
-    std.mem.sort(*const LogicNode, sorted_args_list.items, {}, LogicNode.lessThanNodes);
-
-    const final_args_slice = try allocator.dupe(*const LogicNode, sorted_args_list.items);
+    const final_args_slice = try allocator.dupe(*const LogicNode, unique_args_list.items);
     errdefer allocator.free(final_args_slice);
 
     const node = try allocator.create(LogicNode);
-    errdefer allocator.destroy(node);
-
     node.* = .{ .Or = .{ .args = final_args_slice } };
     return node;
 }
@@ -716,65 +733,62 @@ pub fn createNot(allocator: Allocator, arg: *const LogicNode) error{ OutOfMemory
         // .Not => arg.Not,
         .Not => {
             const child = arg.Not;
-            freeNode(allocator, arg);
+            // freeNode(allocator, arg);
             return child;
         },
         .And => |args| {
             var new_args_list = std.ArrayList(*const LogicNode).init(allocator);
             defer new_args_list.deinit();
 
-            var nodes_create_in_loop = std.ArrayList(*const LogicNode).init(allocator);
-            defer nodes_create_in_loop.deinit();
+            var intermediate_negated_node = std.ArrayList(*const LogicNode).init(allocator);
+            defer intermediate_negated_node.deinit();
 
-            for (args.args) |a| {
-                const negated_a = try createNot(allocator, a);
-                try nodes_create_in_loop.append(negated_a);
-                try new_args_list.append(negated_a);
+            for (args.args) |child_args| {
+                const negated_child = try createNot(allocator, child_args);
+                try intermediate_negated_node.append(negated_child);
+                try new_args_list.append(negated_child);
             }
 
             const result_or = try createOr(allocator, new_args_list.items);
 
-            switch (result_or.*) {
-                .True, .False => {
-                    for (nodes_create_in_loop.items) |node_to_free| {
-                        switch (node_to_free.*) {
-                            .Symbol => {},
-                            .True, .False, .Not, .And, .Or => {
-                                freeNode(allocator, node_to_free);
-                            },
+            if (result_or.* == .True or result_or.* == .False) {
+                for (args.args, 0..) |original_child_for_not, i| {
+                    const corresponding_negated_node = intermediate_negated_node.items[i];
+                    var free_negated_node = false;
+                    if (original_child_for_not.* != .Not) {
+                        if (corresponding_negated_node.* != .True and corresponding_negated_node.* != .False) {
+                            free_negated_node = true;
                         }
                     }
-                },
-                else => {},
+                    if (free_negated_node) freeNode(allocator, corresponding_negated_node);
+                }
             }
             return result_or;
         },
         .Or => |args| {
-            var new_args_list = std.ArrayList(*const LogicNode).init(allocator);
-            defer new_args_list.deinit();
+            var new_and_args_list = std.ArrayList(*const LogicNode).init(allocator);
+            defer new_and_args_list.deinit();
 
-            var nodes_returned_by_recursive_call = std.ArrayList(*const LogicNode).init(allocator);
-            defer nodes_returned_by_recursive_call.deinit();
+            var intermediate_negated_nodes = std.ArrayList(*const LogicNode).init(allocator);
+            defer intermediate_negated_nodes.deinit();
 
-            for (args.args) |a| {
-                const negated_a = try createNot(allocator, a);
-                try nodes_returned_by_recursive_call.append(negated_a);
-                try new_args_list.append(negated_a);
+            for (args.args) |child_arg| {
+                const negated_node = try createNot(allocator, child_arg);
+                try intermediate_negated_nodes.append(negated_node);
+                try new_and_args_list.append(negated_node);
             }
 
-            const result_and = try createAnd(allocator, new_args_list.items);
-            switch (result_and.*) {
-                .True, .False => {
-                    for (nodes_returned_by_recursive_call.items) |node_to_free| {
-                        switch (node_to_free.*) {
-                            .Symbol => {},
-                            .True, .False, .Not, .And, .Or => {
-                                freeNode(allocator, node_to_free);
-                            },
-                        }
+            const result_and = try createAnd(allocator, new_and_args_list.items);
+
+            if (result_and.* != .True or result_and.* != .False) {
+                for (args.args, 0..) |original_child_for_not, i| {
+                    const corresponding_negated_node = intermediate_negated_nodes.items[i];
+                    var free_negated_node = false;
+                    if (original_child_for_not.* != .Not) {
+                        if (corresponding_negated_node.* != .True and corresponding_negated_node.* != .False) free_negated_node = true;
                     }
-                },
-                else => {},
+                    if (free_negated_node) freeNode(allocator, corresponding_negated_node);
+                }
             }
             return result_and;
         },

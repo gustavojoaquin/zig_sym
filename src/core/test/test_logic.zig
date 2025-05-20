@@ -148,21 +148,16 @@ test "test Logic Cmp and Hash" {
     const c = try logic.createSymbol(allocator, "c");
     defer logic.freeNode(allocator, c);
 
-    // Need raw !b for comparison, not one that will be immediately simplified if possible.
-    // createNot on a Symbol creates a new .Not node.
     const not_b_raw = try logic.createNot(allocator, b);
     defer logic.freeNode(allocator, not_b_raw);
 
-    // l1 and l2 are created, they own their args slices but not the child nodes (a, not_b_raw).
     const l1 = try logic.createAnd(allocator, &.{ a, not_b_raw }); // a & !b
     defer logic.freeNode(allocator, l1);
     const l2 = try logic.createAnd(allocator, &.{ a, not_b_raw }); // a & !b (same structure)
     defer logic.freeNode(allocator, l2);
 
-    // Check structural equality using eqlNodes
     try std.testing.expectEqual(true, LogicNode.eqlNodes(l1, l2));
 
-    // Check structural hash (should be equal for equal nodes)
     var hasher1 = std.hash.Wyhash.init(0);
     LogicNode.deepHashNodes(&hasher1, l1);
     var hasher2 = std.hash.Wyhash.init(0);

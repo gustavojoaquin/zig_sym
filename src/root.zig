@@ -13,7 +13,7 @@ pub const Kind = @import("core/kind.zig");
 pub const test_kind = @import("core/test/test_kind.zig");
 
 pub const logic = @import("core/logic.zig");
-// pub const test_logic = @import("core/test/test_logic.zig");
+pub const test_logic = @import("core/test/test_logic.zig");
 
 test "basic add functionality" {
     try testing.expect(add(3, 7) == 10);
