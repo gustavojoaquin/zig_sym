@@ -199,236 +199,205 @@ test "test Logic Cmp and Hash" {
 
 }
 
-// test "test Logic Operators" {
-//     const allocator = std.testing.allocator;
-//
-//     const a = try logic.createSymbol(allocator, "a");
-//     defer logic.freeNode(allocator, a); // Test owns original symbol 'a'
-//     const b = try logic.createSymbol(allocator, "b");
-//     defer logic.freeNode(allocator, b); // Test owns original symbol 'b'
-//     const c = try logic.createSymbol(allocator, "c");
-//     defer logic.freeNode(allocator, c); // Test owns original symbol 'c'
-//
-//     // Test !!a -> a simplification and memory cleanup
-//     const not_a_intermediate = try logic.createNot(allocator, a); // Creates a .Not node wrapping 'a'. This node is dynamically allocated by createNot.
-//     // When we call createNot on not_a_intermediate, it simplifies to 'a' and *frees* not_a_intermediate internally.
-//     const not_not_a = try logic.createNot(allocator, not_a_intermediate); // Should return 'a' (the original 'a' node). createNot frees not_a_intermediate.
-//     // The result not_not_a is the same pointer as 'a'. We don't free 'a' here, it's handled by its defer.
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(a, not_not_a)); // not_not_a structurally equals 'a'
-//     try std.testing.expectEqual(a, not_not_a); // not_not_a *is* the same pointer as 'a'
-//
-//     // Test !(True) -> False
-//     const true_node = try logic.createTrue(allocator);
-//     defer logic.freeNode(allocator, true_node);
-//     const not_true = try logic.createNot(allocator, true_node);
-//     defer logic.freeNode(allocator, not_true); // not_true is a newly allocated False node
-//
-//     const expected_false = try logic.createFalse(allocator);
-//     defer logic.freeNode(allocator, expected_false);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(not_true, expected_false)); // Compare structurally
-//
-//     // Test !(False) -> True
-//     const false_node = try logic.createFalse(allocator);
-//     defer logic.freeNode(allocator, false_node);
-//     const not_false = try logic.createNot(allocator, false_node);
-//     defer logic.freeNode(allocator, not_false); // not_false is a newly allocated True node
-//
-//     const expected_true = try logic.createTrue(allocator);
-//     defer logic.freeNode(allocator, expected_true);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(not_false, expected_true)); // Compare structurally
-//
-//     // Test De Morgan's: !(a & b) -> !a | !b
-//     const a_and_b = try logic.createAnd(allocator, &.{ a, b }); // Creates a & b. This node is dynamically allocated.
-//     defer logic.freeNode(allocator, a_and_b); // Test owns a_and_b
-//
-//     const not_a_and_b = try logic.createNot(allocator, a_and_b); // Creates !(a & b) -> !a | !b. This node is dynamically allocated.
-//     defer logic.freeNode(allocator, not_a_and_b); // Test owns not_a_and_b.
-//
-//     // Create the expected result !a | !b
-//     const not_a_node = try logic.createNot(allocator, a); // Creates !a. Allocated by createNot.
-//     defer logic.freeNode(allocator, not_a_node); // Test owns this intermediate !a node.
-//     const not_b_node = try logic.createNot(allocator, b); // Creates !b. Allocated by createNot.
-//     defer logic.freeNode(allocator, not_b_node); // Test owns this intermediate !b node.
-//     const not_a_or_not_b = try logic.createOr(allocator, &.{ not_a_node, not_b_node }); // Creates !a | !b. Allocated by createOr.
-//     defer logic.freeNode(allocator, not_a_or_not_b); // Test owns not_a_or_not_b.
-//
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(not_a_and_b, not_a_or_not_b)); // Compare structurally
-//
-//     // Test De Morgan's: !(a | b) -> !a & !b
-//     const a_or_b = try logic.createOr(allocator, &.{ a, b }); // Creates a | b. Allocated.
-//     defer logic.freeNode(allocator, a_or_b); // Test owns a_or_b
-//
-//     const not_a_or_b = try logic.createNot(allocator, a_or_b); // Creates !(a | b) -> !a & !b. Allocated.
-//     defer logic.freeNode(allocator, not_a_or_b); // Test owns not_a_or_b.
-//
-//     // We already have not_a_node and not_b_node from the previous test (if run sequentially).
-//     // If tests are run in parallel, re-create them:
-//     const not_a_node_2 = try logic.createNot(allocator, a);
-//     defer logic.freeNode(allocator, not_a_node_2);
-//     const not_b_node_2 = try logic.createNot(allocator, b);
-//     defer logic.freeNode(allocator, not_b_node_2);
-//     const not_a_and_not_b = try logic.createAnd(allocator, &.{ not_a_node_2, not_b_node_2 }); // Creates !a & !b. Allocated.
-//     defer logic.freeNode(allocator, not_a_and_not_b); // Test owns not_a_and_not_b.
-//
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(not_a_or_b, not_a_and_not_b)); // Compare structurally
-//
-//     // Test simplification: a & a -> a
-//     const a_and_a_result = try logic.createAnd(allocator, &.{ a, a }); // Should return 'a' (the original a node)
-//     // No defer freeNode on a_and_a_result because it *is* the original 'a' node.
-//     try std.testing.expectEqual(a, a_and_a_result); // Check pointer equality here, as it should return the original.
-//
-//     // Test simplification: a | a -> a
-//     const a_or_a_result = try logic.createOr(allocator, &.{ a, a }); // Should return 'a'
-//     // No defer freeNode on a_or_a_result because it *is* the original 'a' node.
-//     try std.testing.expectEqual(a, a_or_a_result); // Check pointer equality here.
-//
-//     // Test simplification: a & True -> a
-//     const true_node_2 = try logic.createTrue(allocator);
-//     defer logic.freeNode(allocator, true_node_2);
-//     const a_and_true_result = try logic.createAnd(allocator, &.{ a, true_node_2 }); // Should return 'a'
-//     // No defer freeNode on a_and_true_result because it *is* the original 'a' node.
-//     try std.testing.expectEqual(a, a_and_true_result); // Check pointer equality here.
-//
-//     // Test simplification: a | False -> a
-//     const false_node_2 = try logic.createFalse(allocator);
-//     defer logic.freeNode(allocator, false_node_2);
-//     const a_or_false_result = try logic.createOr(allocator, &.{ a, false_node_2 }); // Should return 'a'
-//     // No defer freeNode on a_or_false_result because it *is* the original 'a' node.
-//     try std.testing.expectEqual(a, a_or_false_result); // Check pointer equality here.
-//
-//     // Test contradiction: a & !a -> False
-//     const not_a_contr_input = try logic.createNot(allocator, a); // Creates !a (a dynamically allocated .Not node wrapping 'a')
-//     // This not_a_contr_input node is passed to createAnd. createAnd detects contradiction and frees it internally.
-//     const a_and_not_a_result = try logic.createAnd(allocator, &.{ a, not_a_contr_input }); // Should return False node. createAnd frees not_a_contr_input.
-//     defer logic.freeNode(allocator, a_and_not_a_result); // a_and_not_a_result is a newly allocated False node.
-//
-//     const expected_false_2 = try logic.createFalse(allocator);
-//     defer logic.freeNode(allocator, expected_false_2);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(expected_false_2, a_and_not_a_result)); // Compare structurally
-//
-//     // Test contradiction: a | !a -> True
-//     const not_a_contr_input_2 = try logic.createNot(allocator, a); // Creates !a (allocated .Not node)
-//     // This node is passed to createOr. createOr detects contradiction and frees it internally.
-//     const a_or_not_a_result = try logic.createOr(allocator, &.{ a, not_a_contr_input_2 }); // Should return True node. createOr frees not_a_contr_input_2.
-//     defer logic.freeNode(allocator, a_or_not_a_result); // a_or_not_a_result is a newly allocated True node.
-//
-//     const expected_true_2 = try logic.createTrue(allocator);
-//     defer logic.freeNode(allocator, expected_true_2);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(expected_true_2, a_or_not_a_result)); // Compare structurally
-//
-//     // Test simplification: And(True) -> True
-//     const true_node_3 = try logic.createTrue(allocator);
-//     defer logic.freeNode(allocator, true_node_3);
-//     const and_true_result = try logic.createAnd(allocator, &.{true_node_3}); // Should return True node
-//     defer logic.freeNode(allocator, and_true_result); // and_true_result is a newly allocated True node. createAnd frees input true_node_3.
-//
-//     const expected_true_3 = try logic.createTrue(allocator);
-//     defer logic.freeNode(allocator, expected_true_3);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(expected_true_3, and_true_result));
-//
-//     // Test simplification: And(False) -> False
-//     const false_node_3 = try logic.createFalse(allocator);
-//     defer logic.freeNode(allocator, false_node_3);
-//     const and_false_result = try logic.createAnd(allocator, &.{false_node_3}); // Should return False node
-//     defer logic.freeNode(allocator, and_false_result); // and_false_result is a newly allocated False node. createAnd frees input false_node_3.
-//
-//     const expected_false_3 = try logic.createFalse(allocator);
-//     defer logic.freeNode(allocator, expected_false_3);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(expected_false_3, and_false_result));
-//
-//     // Test simplification: Or(True) -> True
-//     const true_node_4 = try logic.createTrue(allocator);
-//     defer logic.freeNode(allocator, true_node_4);
-//     const or_true_result = try logic.createOr(allocator, &.{true_node_4}); // Should return True node
-//     defer logic.freeNode(allocator, or_true_result); // or_true_result is a newly allocated True node. createOr frees input true_node_4.
-//
-//     const expected_true_4 = try logic.createTrue(allocator);
-//     defer logic.freeNode(allocator, expected_true_4);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(expected_true_4, or_true_result));
-//
-//     // Test simplification: Or(False) -> False
-//     const false_node_4 = try logic.createFalse(allocator);
-//     defer logic.freeNode(allocator, false_node_4);
-//     const or_false_result = try logic.createOr(allocator, &.{false_node_4}); // Should return False node
-//     defer logic.freeNode(allocator, or_false_result); // or_false_result is a newly allocated False node. createOr frees input false_node_4.
-//
-//     const expected_false_4 = try logic.createFalse(allocator);
-//     defer logic.freeNode(allocator, expected_false_4);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(expected_false_4, or_false_result));
-//
-//     // Test simplification: And() -> True
-//     const and_empty_result = try logic.createAnd(allocator, &.{}); // Should return True node
-//     defer logic.freeNode(allocator, and_empty_result); // newly allocated True node
-//     const expected_true_5 = try logic.createTrue(allocator);
-//     defer logic.freeNode(allocator, expected_true_5);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(expected_true_5, and_empty_result));
-//
-//     // Test simplification: Or() -> False
-//     const or_empty_result = try logic.createOr(allocator, &.{}); // Should return False node
-//     defer logic.freeNode(allocator, or_empty_result); // newly allocated False node
-//     const expected_false_5 = try logic.createFalse(allocator);
-//     defer logic.freeNode(allocator, expected_false_5);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(expected_false_5, or_empty_result));
-//
-//     // Test De Morgan's resulting in singleton: !(a | !a) -> !(True) -> False
-//     const not_a_contr_input_3_for_or = try logic.createNot(allocator, a); // Creates !a (allocated)
-//     const a_or_not_a_intermediate_3 = try logic.createOr(allocator, &.{ a, not_a_contr_input_3_for_or }); // Simplifies to TrueNode. createOr frees not_a_contr_input_3_for_or.
-//     defer logic.freeNode(allocator, a_or_not_a_intermediate_3); // a_or_not_a_intermediate_3 is newly allocated True node.
-//
-//     const not_a_or_not_a_result = try logic.createNot(allocator, a_or_not_a_intermediate_3); // Creates !(True) which simplifies to FalseNode. createNot frees a_or_not_a_intermediate_3.
-//     defer logic.freeNode(allocator, not_a_or_not_a_result); // not_a_or_not_a_result is newly allocated False node.
-//
-//     const expected_false_6 = try logic.createFalse(allocator);
-//     defer logic.freeNode(allocator, expected_false_6);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(expected_false_6, not_a_or_not_a_result));
-//
-//     // Test De Morgan's resulting in singleton: !(a & !a) -> !(False) -> True
-//     const not_a_contr_input_4_for_and = try logic.createNot(allocator, a); // Creates !a (allocated)
-//     const a_and_not_a_intermediate_2 = try logic.createAnd(allocator, &.{ a, not_a_contr_input_4_for_and }); // Simplifies to FalseNode. createAnd frees not_a_contr_input_4_for_and.
-//     defer logic.freeNode(allocator, a_and_not_a_intermediate_2); // a_and_not_a_intermediate_2 is newly allocated False node.
-//
-//     const not_a_and_not_a_result = try logic.createNot(allocator, a_and_not_a_intermediate_2); // Creates !(False) which simplifies to TrueNode. createNot frees a_and_not_a_intermediate_2.
-//     defer logic.freeNode(allocator, not_a_and_not_a_result); // not_a_and_not_a_result is newly allocated True node.
-//
-//     const expected_true_6 = try logic.createTrue(allocator);
-//     defer logic.freeNode(allocator, expected_true_6);
-//     try std.testing.expectEqual(true, LogicNode.eqlNodes(expected_true_6, not_a_and_not_a_result));
-//
-//     // Test creating complex structure and freeing (using fromString)
-//     const expr_str = "(!a & b) | c";
-//     const expr_parsed = try logic.fromString(allocator, expr_str);
-//     defer logic.freeNode(allocator, expr_parsed); // Test owns the result from fromString
-//
-//     // Test creating complex structure via calls
-//     const not_a_complex = try logic.createNot(allocator, a);
-//     defer logic.freeNode(allocator, not_a_complex); // Test owns !a
-//     const not_a_and_b_complex = try logic.createAnd(allocator, &.{ not_a_complex, b });
-//     defer logic.freeNode(allocator, not_a_and_b_complex); // Test owns (!a & b)
-//     const expr_built = try logic.createOr(allocator, &.{ not_a_and_b_complex, c });
-//     defer logic.freeNode(allocator, expr_built); // Test owns ((!a & b) | c)
-//
-//     // Note: The structural equality of expr_parsed and expr_built depends on the parser's
-//     // ability to produce the same canonical form as the create* functions.
-//     // This test primarily confirms that building complex structures and freeing works.
-//
-//     // Add checks for toString freeing intermediate strings
-//     const simple_and = try logic.createAnd(allocator, &.{ a, b });
-//     defer logic.freeNode(allocator, simple_and);
-//     const simple_and_str = try simple_and.toString(allocator);
-//     defer allocator.free(simple_and_str); // Caller frees the final string
-//     try std.testing.expectEqualStrings("((a & b))", simple_and_str);
-//
-//     const simple_or = try logic.createOr(allocator, &.{ a, b });
-//     defer logic.freeNode(allocator, simple_or);
-//     const simple_or_str = try simple_or.toString(allocator);
-//     defer allocator.free(simple_or_str); // Caller frees the final string
-//     try std.testing.expectEqualStrings("((a | b))", simple_or_str);
-//
-//     const not_a_str = try not_a_complex.toString(allocator); // not_a_complex is !a
-//     defer allocator.free(not_a_str);
-//     try std.testing.expectEqualStrings("!a", not_a_str);
-//
-//     const a_str = try a.toString(allocator);
-//     defer allocator.free(a_str);
-//     try std.testing.expectEqualStrings("a", a_str);
-// }
+test "test Logic cmp" {
+    const allocator = std.testing.allocator;
+
+    const a_sym = try logic.createSymbol(allocator, "a");
+    defer logic.freeNode(allocator, a_sym);
+    // defer allocator.free(a_sym.Symbol);
+    // defer allocator.destroy(a_sym);
+    const b_sym = try logic.createSymbol(allocator, "b");
+    defer logic.freeNode(allocator, b_sym);
+    // defer allocator.destroy(b_sym);
+    const b_not = try logic.createNot(allocator, b_sym);
+    defer logic.freeNode(allocator, b_not);
+    // defer allocator.destroy(b_not);
+    const l1 = try logic.createAnd(allocator, &[_]*const LogicNode{ a_sym, b_not });
+    defer logic.freeNode(allocator, l1);
+
+    const a_sym2 = try logic.createSymbol(allocator, "a");
+    defer logic.freeNode(allocator, a_sym2);
+    const b_sym2 = try logic.createSymbol(allocator, "b");
+    defer logic.freeNode(allocator, b_sym2);
+    const not_b2 = try logic.createNot(allocator, b_sym2);
+    defer logic.freeNode(allocator, not_b2);
+    const l2 = try logic.createAnd(allocator, &[_]*const logic.LogicNode{ a_sym2, not_b2 });
+    defer logic.freeNode(allocator, l2);
+
+    const context = logic.LogicNode.NodeContext{};
+    try std.testing.expectEqual(context.hash(l1), context.hash(l2));
+
+    try std.testing.expect(logic.LogicNode.eqlNodes(l1, l2));
+    try std.testing.expect(!logic.LogicNode.eqlNodes(l1, b_sym));
+
+    const c_sym = try logic.createSymbol(allocator, "c");
+    defer logic.freeNode(allocator, c_sym);
+    const nodes_abc = [_]*const logic.LogicNode{ a_sym, b_sym, c_sym };
+    // defer for (nodes_abc) |node_abc| logic.freeNode(allocator, node_abc);
+
+    const and_abc = try logic.createAnd(allocator, &nodes_abc);
+    defer logic.freeNode(allocator, and_abc);
+
+    const a_sym3 = try logic.createSymbol(allocator, "a");
+    defer logic.freeNode(allocator, a_sym3);
+
+    const b_sym3 = try logic.createSymbol(allocator, "b");
+    defer logic.freeNode(allocator, b_sym3);
+
+    const c_sym3 = try logic.createSymbol(allocator, "c");
+    defer logic.freeNode(allocator, c_sym3);
+
+    const node_b_a_c = [_]*const logic.LogicNode{ b_sym3, a_sym3, c_sym3 };
+    // defer for (node_b_a_c) |node_bac| logic.freeNode(allocator, node_bac);
+
+    const and_bac = try logic.createAnd(allocator, &node_b_a_c);
+    defer logic.freeNode(allocator, and_bac);
+
+    try std.testing.expect(logic.LogicNode.eqlNodes(and_abc, and_bac));
+
+    const a_sym_cmp = try logic.createSymbol(allocator, "a");
+    defer logic.freeNode(allocator, a_sym_cmp);
+
+    const b_sym_cmp = try logic.createSymbol(allocator, "b");
+    defer logic.freeNode(allocator, b_sym_cmp);
+
+    const not_a_sym_cmp = try logic.createNot(allocator, a_sym_cmp);
+    defer logic.freeNode(allocator, not_a_sym_cmp);
+
+    const not_b_sym_cmp = try logic.createNot(allocator, b_sym_cmp);
+    defer logic.freeNode(allocator, not_b_sym_cmp);
+
+    try std.testing.expect(logic.LogicNode.compareNodes({}, not_a_sym_cmp, not_b_sym_cmp) == .lt);
+    try std.testing.expect(logic.LogicNode.compareNodes({}, not_b_sym_cmp, not_a_sym_cmp) == .gt);
+}
+
+test "test logic onearg" {
+    const allocator = std.testing.allocator;
+
+    const true_node = try logic.createTrue(allocator);
+    const false_node = try logic.createFalse(allocator);
+
+    // And() is True (empty args)
+    const empty_and = try logic.createAnd(allocator, &.{});
+    try std.testing.expect(logic.LogicNode.eqlNodes(empty_and, true_node));
+
+    // Or() is False (empty args)
+    const empty_or = try logic.createOr(allocator, &.{});
+    try std.testing.expect(logic.LogicNode.eqlNodes(empty_or, false_node));
+
+    // And(T) == T
+    const and_t = try logic.createAnd(allocator, &.{true_node});
+    try std.testing.expect(logic.LogicNode.eqlNodes(and_t, true_node));
+
+    // And(F) == F
+    const and_f = try logic.createAnd(allocator, &.{false_node});
+    try std.testing.expect(logic.LogicNode.eqlNodes(and_f, false_node));
+
+    // Or(T) == T
+    const or_t = try logic.createOr(allocator, &.{true_node});
+    try std.testing.expect(logic.LogicNode.eqlNodes(or_t, true_node));
+
+    // Or(F) == F
+    const or_f = try logic.createOr(allocator, &.{false_node});
+    // defer logic.freeNode(allocator, or_f);
+    try std.testing.expect(logic.LogicNode.eqlNodes(or_f, false_node));
+
+    // And('a') == 'a' (simplification of single argument)
+    const a_sym = try logic.createSymbol(allocator, "a");
+    defer logic.freeNode(allocator, a_sym);
+    const and_a = try logic.createAnd(allocator, &.{a_sym});
+    try std.testing.expect(logic.LogicNode.eqlNodes(and_a, a_sym));
+
+    // Or('a') == 'a' (simplification of single argument)
+    const or_a = try logic.createOr(allocator, &.{a_sym});
+    try std.testing.expect(logic.LogicNode.eqlNodes(or_a, a_sym));
+}
+
+test "test logic xnotx" {
+    const allocator = std.testing.allocator;
+
+    const a_sym = try logic.createSymbol(allocator, "a");
+    defer logic.freeNode(allocator, a_sym);
+    const not_a = try logic.createNot(allocator, a_sym);
+    defer logic.freeNode(allocator, not_a);
+
+    const true_node = try logic.createTrue(allocator);
+    const false_node = try logic.createFalse(allocator);
+
+    // And('a', Not('a')) == F
+    const and_a_not_a = try logic.createAnd(allocator, &.{ a_sym, not_a });
+    try std.testing.expect(logic.LogicNode.eqlNodes(and_a_not_a, false_node));
+
+    // Or('a', Not('a')) == T
+    const or_a_not_a = try logic.createOr(allocator, &.{ a_sym, not_a });
+    try std.testing.expect(logic.LogicNode.eqlNodes(or_a_not_a, true_node));
+}
+
+test "test logic TF" {
+    const allocator = std.testing.allocator;
+
+    const true_node = try logic.createTrue(allocator);
+    const false_node = try logic.createFalse(allocator);
+
+    // And(F, F) == F
+    var temp_and = try logic.createAnd(allocator, &.{ false_node, false_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_and, false_node));
+
+    // And(F, T) == F
+    temp_and = try logic.createAnd(allocator, &.{ false_node, true_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_and, false_node));
+
+    // And(T, F) == F
+    temp_and = try logic.createAnd(allocator, &.{ true_node, false_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_and, false_node));
+
+    // And(T, T) == T
+    temp_and = try logic.createAnd(allocator, &.{ true_node, true_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_and, true_node));
+
+    // Or(F, F) == F
+    var temp_or = try logic.createOr(allocator, &.{ false_node, false_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_or, false_node));
+
+    // Or(F, T) == T
+    temp_or = try logic.createOr(allocator, &.{ false_node, true_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_or, true_node));
+
+    // Or(T, F) == T
+    temp_or = try logic.createOr(allocator, &.{ true_node, false_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_or, true_node));
+
+    // Or(T, T) == T
+    temp_or = try logic.createOr(allocator, &.{ true_node, true_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_or, true_node));
+
+    // And('a', T) == 'a'
+    const a_sym = try logic.createSymbol(allocator, "a");
+    defer logic.freeNode(allocator, a_sym);
+    temp_and = try logic.createAnd(allocator, &.{ a_sym, true_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_and, a_sym));
+
+    // And('b', F) == F
+    const b_sym = try logic.createSymbol(allocator, "b");
+    defer logic.freeNode(allocator, b_sym);
+    temp_and = try logic.createAnd(allocator, &.{ b_sym, false_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_and, false_node));
+
+    // Or('c', T) == T
+    const c_sym = try logic.createSymbol(allocator, "c");
+    defer logic.freeNode(allocator, c_sym);
+    temp_or = try logic.createOr(allocator, &.{ c_sym, true_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_or, true_node));
+
+    // Or('d', F) == 'd'
+    const d_sym = try logic.createSymbol(allocator, "d");
+    temp_or = try logic.createOr(allocator, &.{ d_sym, false_node });
+    try std.testing.expect(logic.LogicNode.eqlNodes(temp_or, d_sym));
+    logic.freeNode(allocator, temp_or);
+}
+
+test "test logic combine args"{
+    const allocator = std.testing.allocator;
+
+    const a1 = try logic.createSymbol(allocator, "a");
+}
