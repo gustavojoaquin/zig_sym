@@ -185,109 +185,41 @@ pub fn fuzzyNand(args: []const FuzzyBool) FuzzyBool {
     return fuzzyNot(fuzzyAnd(args));
 }
 
-/// Represents a logical expression node.
-/// This is a tagged union representing the different types of nodes
-/// in the logic expression tree.
-pub const LogicNode = union(enum) {
-    /// A conjunction (AND) of arguments. Arguments are sorted for canonical form.
-    And: struct { args: []const *const LogicNode },
-    /// A disjunction (OR) of arguments. Arguments are sorted for canonical form.
-    Or: struct { args: []const *const LogicNode },
-    /// A symbolic variable or proposition
-    Symbol: []const u8,
-    /// A negation (NOT) of a single argument.
-    Not: *const LogicNode,
-    /// The boolean constant True.
-    True,
-    /// The boolean constant False
-    False,
+pub const Node = struct {
+    logic_node: LogicNode,
+    ref_count: std.atomic.Value(usize),
+
+    pub fn acquire(self: *Node) *Node {
+        _ = self.ref_count.fetchAdd(1, .monotonic);
+        return self;
+    }
+    pub fn release(self: *Node, allocator: Allocator) void {
+        if (self.ref_count.fetchSub(1, .release) == 1) {
+            freeNodeContent(allocator, &self.logic_node);
+            allocator.destroy(self);
+        }
+    }
 
     /// Helper function to get the variant tag as a comptime_int for sorting by type.
-    pub fn getTagInt(node: *const LogicNode) u32 {
+    pub fn getTagInt(node: *Node) u32 {
         return @intFromEnum(node.*);
     }
 
     /// Performs a structural comparison between two LogicNodes.
-    /// Needed for sorting and equality checks in HashMaps.
-    pub fn eqlNodes(a: *const LogicNode, b: *const LogicNode) bool {
-        const tag_a = a.*;
-        const tag_b = b.*;
-        if (@intFromEnum(tag_a) != @intFromEnum(tag_b)) return false;
-
-        return switch (tag_a) {
-            .True, .False => true,
-            .Symbol => |s_a| eql(u8, s_a, b.Symbol),
-            .Not => eqlNodes(a.Not, b.Not),
-            .And => |a_and| {
-                const b_and = b.And;
-                if (a_and.args.len != b_and.args.len) return false;
-                for (a_and.args, 0..) |arg_a, i| {
-                    if (!eqlNodes(arg_a, b_and.args[i])) return false;
-                }
-                return true;
-            },
-            .Or => |a_or| {
-                const b_or = b.Or;
-
-                if (a_or.args.len != b_or.args.len) return false;
-                for (a_or.args, 0..) |arg_a, i| {
-                    if (!eqlNodes(arg_a, b_or.args[i])) return false;
-                }
-                return true;
-            },
-            // .S
-        };
-    }
-
-    /// Performs a structural hash of a LogicNode.
-    /// Needed for HashMap keys. Must be consistent with eqlNodes.
-    pub fn deepHashNodes(hasher: *std.hash.Wyhash, node: *const LogicNode) void {
-        hasher.update(@tagName(node.*));
-
-        switch (node.*) {
-            .True, .False => {},
-            .Symbol => |s| hasher.update(s),
-            .Not => deepHashNodes(hasher, node.Not),
-            .And => |a| {
-                for (a.args) |arg| {
-                    deepHashNodes(hasher, arg);
-                }
-            },
-            .Or => |o| {
-                for (o.args) |arg| {
-                    deepHashNodes(hasher, arg);
-                }
-            },
-        }
-    }
-
-    /// Context for HashMap to use structural hashing and equality.
-    pub const NodeContext = struct {
-        pub fn hash(_: NodeContext, key: *const LogicNode) u64 {
-            var hasher = std.hash.Wyhash.init(0);
-            deepHashNodes(&hasher, key);
-            return hasher.final();
-        }
-        pub fn eql(_: NodeContext, a: *const LogicNode, b: *const LogicNode) bool {
-            return eqlNodes(a, b);
-        }
-    };
-
-    /// Performs a structural comparison between two LogicNodes.
     /// Needed for equality checks in HashMaps and canonical sorting.
     /// Returns .lt if a < b, .gt if a > b, .eq if a == b.
-    pub fn compareNodes(_: void, a: *const LogicNode, b: *const LogicNode) Order {
+    pub fn compareNodes(_: void, a: *const Node, b: *const Node) Order {
         if (a == b) return .eq;
-        const tag_order = std.math.order(@intFromEnum(a.*), @intFromEnum(b.*));
+        const tag_order = std.math.order(@intFromEnum(a.logic_node), @intFromEnum(b.logic_node));
 
         if (tag_order != .eq) return tag_order;
 
-        return switch (a.*) {
+        return switch (a.logic_node) {
             .True, .False => .eq,
-            .Symbol => |s1| std.mem.order(u8, s1, b.Symbol),
-            .Not => compareNodes({}, a.Not, b.Not),
+            .Symbol => |s1| std.mem.order(u8, s1, b.logic_node.Symbol),
+            .Not => compareNodes({}, a.logic_node.Not, b.logic_node.Not),
             .And => |a_and| {
-                const b_and = b.And;
+                const b_and = b.logic_node.And;
                 const len_order = std.math.order(a_and.args.len, b_and.args.len);
                 if (len_order != .eq) return len_order;
                 for (a_and.args, 0..) |arg_a, i| {
@@ -297,7 +229,7 @@ pub const LogicNode = union(enum) {
                 return .eq;
             },
             .Or => |a_or| {
-                const b_or = b.Or;
+                const b_or = b.logic_node.Or;
                 const len_order = std.math.order(a_or.args.len, b_or.args.len);
                 if (len_order != .eq) return len_order;
                 for (a_or.args, 0..) |arg_a, i| {
@@ -312,17 +244,83 @@ pub const LogicNode = union(enum) {
     /// Adapter function for sorting functions like std.mem.sort that require a
     /// boolean "less than" comparator.
     /// Returns true if lhs is strictly less than rhs, false otherwise.
-    fn lessThanNodes(context: void, lhs: *const LogicNode, rhs: *const LogicNode) bool {
+    fn lessThanNodes(context: void, lhs: *const Node, rhs: *const Node) bool {
         return compareNodes(context, lhs, rhs) == .lt;
     }
+
+    /// Context for HashMap to use structural hashing and equality.
+    pub const NodeContext = struct {
+        pub fn hash(_: NodeContext, key: *const Node) u64 {
+            var hasher = std.hash.Wyhash.init(0);
+            key.deepHashNodes(&hasher);
+            return hasher.final();
+        }
+        pub fn eql(_: NodeContext, a: *const Node, b: *const Node) bool {
+            return a.eqlNodes(b);
+        }
+    };
+
+    /// Performs a structural hash of a LogicNode.
+    /// Needed for HashMap keys. Must be consistent with eqlNodes.
+    pub fn deepHashNodes(self: *const Node, hasher: *std.hash.Wyhash) void {
+        hasher.update(@tagName(self.logic_node));
+
+        switch (self.logic_node) {
+            .True, .False => {},
+            .Symbol => |s| hasher.update(s),
+            .Not => self.logic_node.Not.deepHashNodes(hasher),
+            .And => |a| {
+                for (a.args) |arg| {
+                    arg.deepHashNodes(hasher);
+                }
+            },
+            .Or => |o| {
+                for (o.args) |arg| {
+                    arg.deepHashNodes(hasher);
+                }
+            },
+        }
+    }
+
+    /// Performs a structural comparison between two LogicNodes.
+    /// Needed for sorting and equality checks in HashMaps.
+    pub fn eqlNodes(self: *const Node, other: *const Node) bool {
+        const tag_a = self.logic_node;
+        const tag_b = other.logic_node;
+        if (@intFromEnum(tag_a) != @intFromEnum(tag_b)) return false;
+
+        return switch (tag_a) {
+            .True, .False => true,
+            .Symbol => |s_a| eql(u8, s_a, other.logic_node.Symbol),
+            .Not => self.logic_node.Not.eqlNodes(other.logic_node.Not),
+            .And => |a_and| {
+                const b_and = other.logic_node.And;
+                if (a_and.args.len != b_and.args.len) return false;
+                for (a_and.args, 0..) |arg_a, i| {
+                    if (!arg_a.eqlNodes(b_and.args[i])) return false;
+                }
+                return true;
+            },
+            .Or => |a_or| {
+                const b_or = other.logic_node.Or;
+
+                if (a_or.args.len != b_or.args.len) return false;
+                for (a_or.args, 0..) |arg_a, i| {
+                    if (!arg_a.eqlNodes(b_or.args[i])) return false;
+                }
+                return true;
+            },
+        };
+    }
+
     /// Converts the LogicNode to a string representation.
     /// Allocates memory for the string using the provided allocator.
-    pub fn toString(self: *const LogicNode, allocator: Allocator) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure, InvalidSyntax }![]const u8 {
-        return switch (self.*) {
+    pub fn toString(self: *const Node, allocator: Allocator) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure, InvalidSyntax }![]const u8 {
+        return switch (self.logic_node) {
             .True => allocator.dupe(u8, "True"),
             .False => allocator.dupe(u8, "False"),
             // .Symbol => |s| s,
-            .Symbol => allocator.dupe(u8, self.Symbol),
+            .Symbol => allocator.dupe(u8, self.logic_node.Symbol),
             // .Not => |arg| try std.fmt.allocPrint(allocator, "{!s}", .{try arg.toString(allocator)}),
             .Not => |arg| {
                 const arg_str = try arg.toString(allocator);
@@ -373,75 +371,124 @@ pub const LogicNode = union(enum) {
     /// Returns:
     ///     A pointer to the resulting LogicNode. This node is owned by the caller
     ///     unless it is the original node or a global singleton.
-    pub fn expand(self: *const LogicNode, allocator: Allocator) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure, InvalidSyntax }!*const LogicNode {
-        // NOTE: Memory management in expand is tricky. If expansion creates a new
-        // node different from `self`, and `self` was dynamically allocated,
-        // `self` needs to be freed by the caller.
-        // The nodes returned by recursive expand calls are owned by this scope
-        // temporarily and either used in the final structure or discarded.
-        // The create* functions handle freeing their immediate internal temps.
-        return switch (self.*) {
-            .Or, .Not, .Symbol, .True, .False => self,
+    pub fn expand(self: *const Node, allocator: Allocator) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure, InvalidSyntax }!*Node {
+        return switch (self.logic_node) {
+            .Or, .Not, .Symbol, .True, .False => self.acquire(),
             .And => |and_node| {
-                var expanded_children = std.ArrayList(*const LogicNode).init(allocator);
-                defer expanded_children.deinit();
+                var expanded_children = std.ArrayList(*Node).init(allocator);
+                defer {
+                    for (expanded_children.items) |node| node.release(allocator);
+                    expanded_children.deinit();
+                }
 
                 var any_child_expanded = false;
                 var or_arg_index: ?usize = null;
-                var or_node_to_distribute: ?*const LogicNode = null;
+                var or_node_to_distribute: ?*Node = null;
 
-                for (and_node.args, 0..) |arg, i| {
+                for (and_node.args) |arg| {
                     const expanded_arg = try arg.expand(allocator);
                     if (expanded_arg != arg) any_child_expanded = true;
                     try expanded_children.append(expanded_arg);
 
                     if (expanded_arg.* == .Or and or_node_to_distribute == null) {
-                        or_arg_index = i;
+                        or_arg_index = expanded_children.items.len - 1;
                         or_node_to_distribute = expanded_arg;
                     }
                 }
 
-                if (or_node_to_distribute) |or_node| {
+                if (or_node_to_distribute) |or_node_to_distribute_val| {
                     const or_index = or_arg_index.?;
-                    var rest_arg_list = std.ArrayList(*const LogicNode).init(allocator);
-                    defer rest_arg_list.deinit();
+                    var rest_arg_list = std.ArrayList(*Node).init(allocator);
+                    defer {
+                        for (rest_arg_list.items) |node| node.release(allocator);
+                        rest_arg_list.deinit();
+                    }
 
                     for (expanded_children.items, 0..) |exp_arg, i| {
                         if (i != or_index) {
-                            try rest_arg_list.append(exp_arg);
+                            try rest_arg_list.append(exp_arg.acquire());
                         }
                     }
 
-                    var distributed_or_args_list = std.ArrayList(*const LogicNode).init(allocator);
-                    defer distributed_or_args_list.deinit();
+                    expanded_children.items = &.{};
 
-                    for (or_node.Or.args) |or_term| {
-                        var new_and_arg_term_list = std.ArrayList(*const LogicNode).init(allocator);
-                        defer new_and_arg_term_list.deinit();
+                    var distributed_or_args_list = std.ArrayList(*Node).init(allocator);
+                    defer {
+                        for (distributed_or_args_list.items) |node| node.release(allocator);
+                        distributed_or_args_list.deinit();
+                    }
 
-                        try new_and_arg_term_list.append(or_term);
-                        try new_and_arg_term_list.appendSlice(rest_arg_list.items);
+                    for (or_node_to_distribute_val.logic_node.Or.args) |or_term| {
+                        var new_and_arg_term_list = std.ArrayList(*Node).init(allocator);
+                        defer {
+                            for (new_and_arg_term_list.items) |node| node.release(allocator);
+                            new_and_arg_term_list.deinit();
+                        }
+
+                        try new_and_arg_term_list.append(or_term.acquire());
+                        for (rest_arg_list.items) |rest_arg| try new_and_arg_term_list.append(rest_arg.acquire());
 
                         const new_and_node = try createAnd(allocator, new_and_arg_term_list.items);
                         const expanded_new_and = try new_and_node.expand(allocator);
 
+                        if (expanded_new_and != new_and_node) new_and_node.release(allocator);
+
                         try distributed_or_args_list.append(expanded_new_and);
+                        new_and_arg_term_list.items = &.{};
                     }
 
+                    self.release(allocator);
+                    or_node_to_distribute_val.release(allocator);
+
                     const final_or_node = try createOr(allocator, distributed_or_args_list);
-                    // TODO: If 'self' (the original AND node) was dynamically allocated
-                    // and is different from 'final_or_node', free 'self'. This is complex.
+                    distributed_or_args_list.items = &.{};
                     return final_or_node;
                 } else if (any_child_expanded) {
+                    self.release(allocator);
                     const result = try createAnd(allocator, expanded_children.items);
+                    expanded_children.items = &.{};
                     return result;
                 } else {
-                    return self;
+                    return self.acquire();
                 }
             },
         };
     }
 };
+
+/// Represents a logical expression node.
+/// This is a tagged union representing the different types of nodes
+/// in the logic expression tree.
+pub const LogicNode = union(enum) {
+    /// A conjunction (AND) of arguments. Arguments are sorted for canonical form.
+    And: struct { args: []const *Node },
+    /// A disjunction (OR) of arguments. Arguments are sorted for canonical form.
+    Or: struct { args: []const *Node },
+    /// A symbolic variable or proposition
+    Symbol: []const u8,
+    /// A negation (NOT) of a single argument.
+    Not: *Node,
+    True,
+    False,
+};
+
+/// Helper to free memory *inside* LogicNode, but not the Node wrapper itself.
+fn freeNodeContent(allocator: Allocator, logic_node: *LogicNode) void {
+    switch (logic_node.*) {
+        .Symbol => |s| allocator.free(s),
+        .Not => |n| n.release(allocator),
+        .And => |a| {
+            for (a.args) |arg| arg.release(allocator);
+            allocator.free(a.args);
+        },
+        .Or => |o| {
+            for (o.args) |arg| arg.release(allocator);
+            allocator.free(o.args);
+        },
+        .True, .False => {},
+    }
+}
+
 /// Parses a logic expression string.
 ///
 /// Accepts a simple format like `!a & b | c` with spaces around `&` and `|`,
@@ -454,13 +501,13 @@ pub const LogicNode = union(enum) {
 /// Returns:
 ///     A pointer to the resulting LogicNode. The caller is responsible for freeing
 ///     this node using `freeNode`. Returns an error if parsing fails.
-pub fn fromString(allocator: Allocator, text: []const u8) error{ OutOfMemory, InvalidSyntax, CustomAllocationFailure, InvalidArguments }!*const LogicNode {
+pub fn fromString(allocator: Allocator, text: []const u8) error{ OutOfMemory, InvalidSyntax, CustomAllocationFailure, InvalidArguments }!*Node {
     var tokens = std.mem.splitAny(u8, text, " &|()");
-    var lexpr: ?*const LogicNode = null;
+    var lexpr: ?*Node = null;
     var schedop: ?enum { And, Or } = null;
 
     while (tokens.next()) |token| {
-        var current_node: ?*const LogicNode = null;
+        var current_node: ?*Node = null;
 
         if (eql(u8, token, "&")) {
             if (schedop == null) return error.InvalidSyntax;
@@ -491,18 +538,17 @@ pub fn fromString(allocator: Allocator, text: []const u8) error{ OutOfMemory, In
         if (schedop) |op| {
             if (lexpr == null or current_node == null) return error.InvalidSyntax;
 
-            var new_expr: ?*const LogicNode = null;
+            var new_expr: *Node = undefined;
             if (op == .And) {
-                const args_slice = [_]*const LogicNode{ lexpr.?, current_node.? };
+                const args_slice = [_]*Node{ lexpr.?, current_node.? };
                 new_expr = try createAnd(allocator, &args_slice);
+            } else {
+                const arg_slice = [_]*Node{ lexpr.?, current_node.? };
+                new_expr = try createOr(allocator, &arg_slice);
             }
-            // TODO: If lexpr was dynamically allocated AND not returned as new_expr, free lexpr.
-            // This requires checking if new_expr is one of lexpr or current_node.
-            // E.g., (a&b) & a -> a&b. Here new_expr is (a&b), lexpr was (a&b), current_node was a.
-            // The old lexpr pointer is returned. Nothing to free here.
-            // E.g., (a&b) & False -> False. Here new_expr is False. lexpr was (a&b). lexpr must be freed.
-            // This implies tracking the origin of lexpr and current_node.
-            // This is the hard part of manual memory for expression trees.
+
+            lexpr.?.release(allocator);
+            current_node.?.release(allocator);
 
             lexpr = new_expr;
             schedop = null;
@@ -515,45 +561,9 @@ pub fn fromString(allocator: Allocator, text: []const u8) error{ OutOfMemory, In
     }
 
     if (schedop == null) return error.InvalidSyntax;
-    if (lexpr == null) return error.InvalidSyntax;
+    if (lexpr != null) return error.InvalidSyntax;
 
     return lexpr.?;
-}
-
-/// Recursively frees the memory owned by a LogicNode and its children.
-/// This helper is simplistic and ASSUMES exclusive ownership of children.
-/// Calling this on nodes with shared children (common in symbolic logic)
-/// will lead to double frees. Use with caution, ideally with an arena allocator.
-pub fn freeNode(allocator: Allocator, node: *const LogicNode) void {
-    switch (node.*) {
-        .False => {
-            std.log.warn("Attempted to free a literal False node.\n", .{});
-        },
-        .True => {
-            std.log.warn("Attempted to free a literal True node.\n", .{});
-        },
-        .Symbol => {
-            allocator.free(node.Symbol);
-        },
-        .Not => {
-            if (!(node.Not.* == .True or node.Not.* == .False)) {
-                freeNode(allocator, node.Not);
-            }
-        },
-        .And => |compound| {
-            for (compound.args) |arg| {
-                freeNode(allocator, arg);
-            }
-            allocator.free(compound.args);
-        },
-        .Or => |compound| {
-            for (compound.args) |arg| {
-                freeNode(allocator, arg);
-            }
-            allocator.free(compound.args);
-        },
-    }
-    allocator.destroy(node);
 }
 
 /// Creates an And node, applying simplification and flattening rules.
@@ -573,27 +583,24 @@ pub fn freeNode(allocator: Allocator, node: *const LogicNode) void {
 /// Returns:
 ///     A pointer to the resulting LogicNode. This node is owned by the caller
 ///     unless it is one of the global singletons (TrueNode, FalseNode).
-pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure }!*const LogicNode {
-    var flattened_list = std.ArrayList(*const LogicNode).init(allocator);
-    defer flattened_list.deinit();
-
-    for (args) |arg| {
-        const empty_and = LogicNode{
-            .And = .{
-                .args = &.{},
-            },
-        };
-
-        try flattenAndOr(allocator, arg, &empty_and, &flattened_list);
+pub fn createAnd(allocator: Allocator, args: []const *Node) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure }!*Node {
+    var flattened_list = std.ArrayList(*Node).init(allocator);
+    defer {
+        for (flattened_list.items) |node| node.release(allocator);
+        flattened_list.deinit();
     }
 
-    var unique_map = std.HashMapUnmanaged(*const LogicNode, void, LogicNode.NodeContext, std.hash_map.default_max_load_percentage){};
-    defer unique_map.deinit(allocator);
+    for (args) |arg| try flattenAndOr(allocator, arg, .{ .And = .{ .args = &.{} } }, &flattened_list);
+
+    var unique_map = std.HashMapUnmanaged(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage){};
 
     for (flattened_list.items) |arg| {
-        switch (arg.*) {
+        switch (arg.logic_node) {
             .False => {
-                return &LogicNode{ .False = {} };
+                var it = unique_map.iterator();
+                while (it.next()) |entry| entry.key_ptr.*.release(allocator);
+                unique_map.deinit(allocator);
+                return createFalse(allocator);
             },
             .True => {
                 continue;
@@ -601,40 +608,51 @@ pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) error{ Ou
             else => {},
         }
 
-        const not_arg_for_check = try createNot(allocator, arg);
-        const is_temp_newly_allocated = is_newly_allocated_by_create_not(not_arg_for_check, arg);
+        const not_arg_for_check = try createNot(allocator, arg.acquire());
+        defer not_arg_for_check.release(allocator);
 
         if (unique_map.contains(not_arg_for_check)) {
-            if (is_temp_newly_allocated) freeNode(allocator, not_arg_for_check);
+            var it = unique_map.iterator();
+            while (it.next()) |entry| entry.key_ptr.*.release(allocator);
             unique_map.deinit(allocator);
-            return &LogicNode{ .False = {} };
+            return try createFalse(allocator);
         }
 
         if (!unique_map.contains(arg)) {
-            try unique_map.put(allocator, arg, {});
+            try unique_map.put(allocator, arg.acquire(), {});
         }
-
-        if (is_temp_newly_allocated) freeNode(allocator, not_arg_for_check);
     }
 
-    var unique_args_list = std.ArrayList(*const LogicNode).init(allocator);
-    defer unique_args_list.deinit();
+    var unique_args_list = std.ArrayList(*Node).init(allocator);
     var it = unique_map.iterator();
     while (it.next()) |entry| {
         try unique_args_list.append(entry.key_ptr.*);
     }
+    unique_map.deinit(allocator);
 
-    if (unique_args_list.items.len == 0) return &LogicNode{ .True = {} };
-    if (unique_args_list.items.len == 1) return unique_args_list.items[0];
+    if (unique_args_list.items.len == 0) {
+        unique_args_list.deinit();
+        return try createTrue(allocator);
+    }
+    if (unique_args_list.items.len == 1) {
+        const result = unique_args_list.items[0];
+        unique_args_list.deinit();
+        return result;
+    }
 
-    std.mem.sort(*const LogicNode, unique_args_list.items, {}, LogicNode.lessThanNodes);
+    std.mem.sort(*Node, unique_args_list.items, {}, Node.lessThanNodes);
 
-    const final_args_slice = try allocator.dupe(*const LogicNode, unique_args_list.items);
-    errdefer allocator.free(final_args_slice);
+    const final_args_slice = try unique_args_list.toOwnedSlice();
 
-    const node = try allocator.create(LogicNode);
-    node.* = .{ .And = .{ .args = final_args_slice } };
-    return node;
+    const node_wrapper = try allocator.create(Node);
+    errdefer {
+        for (final_args_slice) |node| node.release(allocator);
+        allocator.free(final_args_slice);
+        allocator.destroy(node_wrapper);
+    }
+    node_wrapper.logic_node = .{ .And = .{ .args = final_args_slice } };
+    node_wrapper.ref_count = std.atomic.Value(usize).init(1);
+    return node_wrapper;
 }
 
 /// Creates an Or node, applying simplification and flattening rules.
@@ -654,63 +672,76 @@ pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) error{ Ou
 /// Returns:
 ///     A pointer to the resulting LogicNode. This node is owned by the caller
 ///     unless it is one of the global singletons (TrueNode, FalseNode).
-pub fn createOr(allocator: Allocator, args: []const *const LogicNode) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure }!*const LogicNode {
-    var flattened_list = std.ArrayList(*const LogicNode).init(allocator);
-    defer flattened_list.deinit();
-
-    for (args) |arg| {
-        const empty_or = LogicNode{
-            .Or = .{
-                .args = &.{},
-            },
-        };
-        try flattenAndOr(allocator, arg, &empty_or, &flattened_list);
+pub fn createOr(allocator: Allocator, args: []const *Node) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure }!*Node {
+    var flattened_list = std.ArrayList(*Node).init(allocator);
+    defer {
+        for (flattened_list.items) |node_items| node_items.release(allocator);
+        flattened_list.deinit();
     }
 
-    var unique_map = std.HashMapUnmanaged(*const LogicNode, void, LogicNode.NodeContext, std.hash_map.default_max_load_percentage){};
+    for (args) |arg| try flattenAndOr(allocator, arg, .{ .Or = .{ .args = &.{} } }, &flattened_list);
+
+    var unique_map = std.HashMapUnmanaged(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage){};
     defer unique_map.deinit(allocator);
 
     for (flattened_list.items) |arg| {
-        switch (arg.*) {
+        switch (arg.logic_node) {
             .True => {
-                return &LogicNode{ .True = {} };
+                var it = unique_map.iterator();
+                while (it.next()) |entry| entry.key_ptr.*.release(allocator);
+                arg.release(allocator);
+                return try createTrue(allocator);
             },
             .False => {
+                arg.release(allocator);
                 continue;
             },
             else => {},
         }
 
-        const not_arg_for_check = try createNot(allocator, arg);
-        const is_temp_newly_allocated = is_newly_allocated_by_create_not(not_arg_for_check, arg);
+        const not_arg_for_check = try createNot(allocator, arg.acquire());
+        defer not_arg_for_check.release(allocator);
 
         if (unique_map.contains(not_arg_for_check)) {
-            if (is_temp_newly_allocated) freeNode(allocator, not_arg_for_check);
-            unique_map.deinit(allocator);
-            return &LogicNode{ .True = {} };
+            var it = unique_map.iterator();
+            while (it.next()) |entry| entry.key_ptr.*.release(allocator);
+            arg.release(allocator);
+            return try createTrue(allocator);
         }
 
-        if (!unique_map.contains(arg)) try unique_map.put(allocator, arg, {});
-        if (is_temp_newly_allocated) freeNode(allocator, not_arg_for_check);
+        if (!unique_map.contains(arg)) try unique_map.put(allocator, arg.acquire(), {}) else arg.release(allocator);
     }
+    flattened_list.items = &.{};
 
-    var unique_args_list = std.ArrayList(*const LogicNode).init(allocator);
+    var unique_args_list = std.ArrayList(*Node).init(allocator);
     defer unique_args_list.deinit();
+
     var it = unique_map.iterator();
-    while (it.next()) |entry| {
-        try unique_args_list.append(entry.key_ptr.*);
+    while (it.next()) |entry| try unique_args_list.append(entry.key_ptr.*);
+
+    unique_map.clearAndFree(allocator);
+
+    if (unique_args_list.items.len == 0) return try createFalse(allocator);
+    if (unique_args_list.items.len == 1) {
+        const result = unique_args_list.items[0];
+        unique_args_list.items = &.{};
+        return result;
+    }
+    std.mem.sort(*Node, unique_args_list.items, {}, Node.lessThanNodes);
+
+    const final_args_slice = try allocator.dupe(*Node, unique_args_list.items);
+    errdefer {
+        for (final_args_slice) |node| node.release(allocator);
+        allocator.free(final_args_slice);
     }
 
-    if (unique_args_list.items.len == 0) return &LogicNode{ .False = {} };
-    if (unique_args_list.items.len == 1) return unique_args_list.items[0];
-    std.mem.sort(*const LogicNode, unique_args_list.items, {}, LogicNode.lessThanNodes);
+    unique_args_list.items = &.{};
 
-    const final_args_slice = try allocator.dupe(*const LogicNode, unique_args_list.items);
-    errdefer allocator.free(final_args_slice);
-
-    const node = try allocator.create(LogicNode);
-    node.* = .{ .Or = .{ .args = final_args_slice } };
-    return node;
+    const node_wrapper = try allocator.create(Node);
+    errdefer allocator.destroy(node_wrapper);
+    node_wrapper.logic_node = .{ .Or = .{ .args = final_args_slice } };
+    node_wrapper.ref_count = std.atomic.Value(usize).init(1);
+    return node_wrapper;
 }
 
 /// Creates a Not node, applying simplification rules.
@@ -729,69 +760,46 @@ pub fn createOr(allocator: Allocator, args: []const *const LogicNode) error{ Out
 ///     unless it is one of the global singletons (TrueNode, FalseNode) or
 ///     a direct reference to the original node's child (as in !!X -> X).
 ///     The caller should use recursiveFree if it determines the returned node is owned.
-pub fn createNot(allocator: Allocator, arg: *const LogicNode) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure }!*const LogicNode {
-    return switch (arg.*) {
-        .True => return &LogicNode{ .False = {} },
-        .False => return &LogicNode{ .True = {} },
-        // .Not => arg.Not,
+pub fn createNot(allocator: Allocator, arg: *Node) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure }!*Node {
+    defer arg.release(allocator);
+
+    return switch (arg.logic_node) {
+        .True => return try createFalse(allocator),
+        .False => return try createTrue(allocator),
         .Not => {
-            const child = arg.Not;
-            // freeNode(allocator, arg);
-            return child;
+            const child = arg.logic_node.Not;
+            return child.acquire();
         },
         .And => |args| {
-            var new_args_list = std.ArrayList(*const LogicNode).init(allocator);
-            var result_or = try createOr(allocator, new_args_list.items);
-
-            defer {
-                if (new_args_list.items.len > 0) {
-                    if (result_or.* == .True or result_or.* == .False) {
-                        for (new_args_list.items) |node_to_check_for_free| {
-                            if (node_to_check_for_free.* == .Not) {
-                                freeNode(allocator, node_to_check_for_free);
-                            }
-                        }
-                    }
-                }
-                new_args_list.deinit();
-            }
+            var new_args_list = std.ArrayList(*Node).init(allocator);
+            defer new_args_list.deinit();
 
             for (args.args) |child_args| {
-                const negated_child = try createNot(allocator, child_args);
+                const negated_child = try createNot(allocator, child_args.acquire());
                 try new_args_list.append(negated_child);
             }
 
-            result_or = try createOr(allocator, new_args_list.items);
+            const result_or = try createOr(allocator, new_args_list.items);
+            new_args_list.items = &.{};
             return result_or;
         },
         .Or => |args| {
-            var new_and_args_list = std.ArrayList(*const LogicNode).init(allocator);
-            var result_and = try createAnd(allocator, new_and_args_list.items);
-            defer {
-                if (new_and_args_list.items.len > 0) {
-                    if (result_and.* == .True or result_and.* == .False) {
-                        for (new_and_args_list.items) |node_to_check_for_free| {
-                            if (node_to_check_for_free.* == .Not) {
-                                freeNode(allocator, node_to_check_for_free);
-                            }
-                        }
-                    }
-                }
-                new_and_args_list.deinit();
-            }
+            var new_and_args_list = std.ArrayList(*Node).init(allocator);
+            defer new_and_args_list.deinit();
 
             for (args.args) |child_arg| {
-                const negated_node = try createNot(allocator, child_arg);
+                const negated_node = try createNot(allocator, child_arg.acquire());
                 try new_and_args_list.append(negated_node);
             }
 
-            result_and = try createAnd(allocator, new_and_args_list.items);
+            const result_and = try createAnd(allocator, new_and_args_list.items);
+            new_and_args_list.items = &.{};
             return result_and;
         },
         else => {
-            const node = try allocator.create(LogicNode);
-            // defer allocator.destroy(node);
-            node.* = .{ .Not = arg };
+            const node = try allocator.create(Node);
+            node.logic_node = .{ .Not = arg.acquire() };
+            node.ref_count = std.atomic.Value(usize).init(1);
             return node;
         },
     };
@@ -799,53 +807,53 @@ pub fn createNot(allocator: Allocator, arg: *const LogicNode) error{ OutOfMemory
 
 /// Helper to recursively flatten And/Or nodes of the target type.
 /// Adds non-matching nodes or flattened children to the result list.
-fn flattenAndOr(allocator: Allocator, node: *const LogicNode, target: *const LogicNode, result_list: *std.ArrayList(*const LogicNode)) error{OutOfMemory}!void {
-    const target_tag = @tagName(target.*);
-    switch (node.*) {
-        .And => |and_node| {
-            if (std.mem.eql(u8, @tagName(node.*), target_tag)) {
-                for (and_node.args) |sub_arg| {
-                    try flattenAndOr(allocator, sub_arg, target, result_list);
-                }
-            } else {
-                try result_list.append(node);
-            }
-        },
-        .Or => |or_node| {
-            if (std.mem.eql(u8, @tagName(node.*), target_tag)) {
-                for (or_node.args) |sub_arg| {
-                    try flattenAndOr(allocator, sub_arg, target, result_list);
-                }
-            } else {
-                try result_list.append(node);
-            }
-        },
-        else => {
-            try result_list.append(node);
-        },
-    }
+/// Consumes `node` (releases its ref_count when done).
+fn flattenAndOr(allocator: Allocator, node: *Node, target_logic: LogicNode, result_list: *std.ArrayList(*Node)) error{OutOfMemory}!void {
+    defer node.release(allocator);
+
+    const node_tag = @tagName(node.logic_node);
+    const target_tag = @tagName(target_logic);
+
+    if (std.mem.eql(u8, node_tag, target_tag)) {
+        const children = switch (node.logic_node) {
+            .And => node.logic_node.And.args,
+            .Or => node.logic_node.Or.args,
+            else => unreachable,
+        };
+        for (children) |child_arg| try flattenAndOr(allocator, child_arg.acquire(), target_logic, result_list);
+    } else try result_list.append(node.acquire());
 }
 
 /// Creates a Symbol node.
 /// Allocates memory for the node and duplicates the symbol name.
 /// The caller is responsible for freeing the returned node using recursiveFree.
-pub fn createSymbol(allocator: Allocator, name: []const u8) !*const LogicNode {
+pub fn createSymbol(allocator: Allocator, name: []const u8) !*Node {
     const name_copy = try allocator.dupe(u8, name);
     errdefer allocator.free(name_copy);
 
-    const node = try allocator.create(LogicNode);
-    errdefer allocator.destroy(node);
+    const node_wrapper = try allocator.create(Node);
+    errdefer allocator.destroy(node_wrapper);
 
-    node.* = .{ .Symbol = name_copy };
-    return node;
+    node_wrapper.logic_node = .{ .Symbol = name_copy };
+    node_wrapper.ref_count = std.atomic.Value(usize).init(1);
+    return node_wrapper;
 }
 
 /// Creates a LogicNode representing True.
-pub fn createTrue(_: Allocator) !*const LogicNode {
-    return &LogicNode{ .True = {} };
+pub fn createTrue(allocator: Allocator) !*Node {
+    const node = try allocator.create(Node);
+    errdefer allocator.destroy(node);
+
+    node.logic_node = .{ .True = {} };
+    node.ref_count = std.atomic.Value(usize).init(1);
+    return node;
 }
 
 /// Creates a LogicNode representing False.
-pub fn createFalse(_: Allocator) !*const LogicNode {
-    return &LogicNode{ .False = {} };
+pub fn createFalse(allocator: Allocator) !*Node {
+    const node = try allocator.create(Node);
+    errdefer allocator.destroy(node);
+    node.logic_node = .{ .True = {} };
+    node.ref_count = std.atomic.Value(usize).init(1);
+    return node;
 }

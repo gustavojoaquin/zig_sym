@@ -510,20 +510,25 @@ test "test logic combine args" {
 
     // Or('t', And('n', 'p', 'r'), And('n', 'r'), And('n', 'p', 'r'), 't', And('n', 'r')) == Or('t', And('n', 'p', 'r'), And('n', 'r')) (complex simplification)
     const t_sym = try logic.createSymbol(allocator, "t");
+    defer t_sym.release(allocator);
     const n_sym = try logic.createSymbol(allocator, "n");
+    defer n_sym.release(allocator);
     const p_sym = try logic.createSymbol(allocator, "p");
+    defer p_sym.release(allocator);
     const r_sym = try logic.createSymbol(allocator, "r");
+    defer r_sym.release(allocator);
 
     const and_npr = try logic.createAnd(allocator, &.{ n_sym, p_sym, r_sym });
+    defer and_npr.release(allocator);
 
     const and_nr = try logic.createAnd(allocator, &.{ n_sym, r_sym });
+    defer and_nr.release(allocator);
 
-    const complex_or_args = [_]*const LogicNode{ t_sym, and_npr, and_nr, and_npr, t_sym, and_nr };
+    const complex_or_args = [_]*logic.Node{ t_sym, and_npr, and_nr, and_npr, t_sym, and_nr };
     // defer logic.freeNode(allocator, complex_or_args[1]);
 
     const complex_or = try logic.createOr(allocator, &complex_or_args);
-    defer logic.freeNode(allocator, complex_or);
-
+    defer complex_or.release(allocator);
     // const expected_or_args = [_]*const LogicNode{ t_sym, and_npr, and_nr };
     //
     // const expected_or = try logic.createOr(allocator, &expected_or_args);
