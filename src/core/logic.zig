@@ -534,20 +534,26 @@ pub fn freeNode(allocator: Allocator, node: *const LogicNode) void {
         },
         .Symbol => {
             allocator.free(node.Symbol);
-            allocator.destroy(node);
         },
         .Not => {
-            allocator.destroy(node);
+            if (!(node.Not.* == .True or node.Not.* == .False)) {
+                freeNode(allocator, node.Not);
+            }
         },
         .And => |compound| {
+            for (compound.args) |arg| {
+                freeNode(allocator, arg);
+            }
             allocator.free(compound.args);
-            allocator.destroy(node);
         },
         .Or => |compound| {
+            for (compound.args) |arg| {
+                freeNode(allocator, arg);
+            }
             allocator.free(compound.args);
-            allocator.destroy(node);
         },
     }
+    allocator.destroy(node);
 }
 
 /// Creates an And node, applying simplification and flattening rules.
@@ -600,6 +606,7 @@ pub fn createAnd(allocator: Allocator, args: []const *const LogicNode) error{ Ou
 
         if (unique_map.contains(not_arg_for_check)) {
             if (is_temp_newly_allocated) freeNode(allocator, not_arg_for_check);
+            unique_map.deinit(allocator);
             return &LogicNode{ .False = {} };
         }
 
@@ -679,6 +686,7 @@ pub fn createOr(allocator: Allocator, args: []const *const LogicNode) error{ Out
 
         if (unique_map.contains(not_arg_for_check)) {
             if (is_temp_newly_allocated) freeNode(allocator, not_arg_for_check);
+            unique_map.deinit(allocator);
             return &LogicNode{ .True = {} };
         }
 
