@@ -185,14 +185,49 @@ pub fn fuzzyNand(args: []const FuzzyBool) FuzzyBool {
     return fuzzyNot(fuzzyAnd(args));
 }
 
+/// Represents a node in a logical expression tree.
+///
+/// `Node` is a reference-counted wrapper around a `LogicNode` union.
+/// It handles memory management through `acquire` and `release` methods.
+/// Nodes can represent boolean constants (True, False), symbolic variables,
+/// or logical operations (Not, And, Or).
+///
+/// When a `Node` is created (e.g., via `createSymbol`, `createAnd`, etc.),
+/// it typically starts with a reference count of 1, and the creator function
+/// transfers ownership of this initial reference to the caller. The caller is
+/// responsible for calling `release` when the node is no longer needed in that scope.
+///
+/// Internal structures (like an `And` node holding child `Node`s) also hold
+/// references to their children, incrementing their `ref_count` accordingly.
 pub const Node = struct {
+    /// The underlying logical operation or value.
     logic_node: LogicNode,
+    /// The atomic reference counter for managing the node's lifecycle.
     ref_count: std.atomic.Value(usize),
 
+    /// Acquires an additional reference to this Node.
+    ///
+    /// This increments the node's reference count. It is the caller's responsibility
+    /// to eventually call `release` for every `acquire` call to prevent memory leaks.
+    ///
+    /// Returns:
+    ///     A pointer to self, for chaining or convenience.
     pub fn acquire(self: *Node) *Node {
         _ = self.ref_count.fetchAdd(1, .monotonic);
         return self;
     }
+
+    /// Releases a reference to this Node.
+    ///
+    /// This decrements the node's reference count. If the reference count reaches zero,
+    /// the node's internal content (e.g., symbol name, child nodes in And/Or/Not)
+    /// is recursively released, and then the Node object itself is deallocated using
+    /// the provided allocator.
+    ///
+    /// Args:
+    ///     allocator: The allocator used to free the node and its content if
+    ///                the reference count drops to zero. This must be the same
+    ///                allocator used to create the node.
     pub fn release(self: *Node, allocator: Allocator) void {
         if (self.ref_count.fetchSub(1, .release) == 1) {
             freeNodeContent(allocator, &self.logic_node);
@@ -200,68 +235,83 @@ pub const Node = struct {
         }
     }
 
-    /// Helper function to get the variant tag as a comptime_int for sorting by type.
+    /// Helper function to get the variant tag of the underlying `LogicNode`
+    /// as a comptime_int, primarily for sorting nodes by their type.
+    /// This function does not affect the reference count of the node.
+    ///
+    /// Args:
+    ///     node: The node whose tag is to be retrieved.
+    ///
+    /// Returns:
+    ///     An integer representing the enum tag of `node.logic_node`.
     pub fn getTagInt(node: *Node) u32 {
         return @intFromEnum(node.*);
     }
 
-    /// Performs a structural comparison between two LogicNodes.
-    /// Needed for equality checks in HashMaps and canonical sorting.
-    /// Returns .lt if a < b, .gt if a > b, .eq if a == b.
-    pub fn compareNodes(_: void, a: *const Node, b: *const Node) Order {
-        if (a == b) return .eq;
-        const tag_order = std.math.order(@intFromEnum(a.logic_node), @intFromEnum(b.logic_node));
-
-        if (tag_order != .eq) return tag_order;
-
-        return switch (a.logic_node) {
-            .True, .False => .eq,
-            .Symbol => |s1| std.mem.order(u8, s1, b.logic_node.Symbol),
-            .Not => compareNodes({}, a.logic_node.Not, b.logic_node.Not),
-            .And => |a_and| {
-                const b_and = b.logic_node.And;
-                const len_order = std.math.order(a_and.args.len, b_and.args.len);
-                if (len_order != .eq) return len_order;
-                for (a_and.args, 0..) |arg_a, i| {
-                    const arg_order = compareNodes({}, arg_a, b_and.args[i]);
-                    if (arg_order != .eq) return arg_order;
-                }
-                return .eq;
-            },
-            .Or => |a_or| {
-                const b_or = b.logic_node.Or;
-                const len_order = std.math.order(a_or.args.len, b_or.args.len);
-                if (len_order != .eq) return len_order;
-                for (a_or.args, 0..) |arg_a, i| {
-                    const arg_order = compareNodes({}, arg_a, b_or.args[i]);
-                    if (arg_order != .eq) return arg_order;
-                }
-                return .eq;
-            },
-        };
-    }
-
-    /// Adapter function for sorting functions like std.mem.sort that require a
+    /// Adapter function for sorting functions like `std.mem.sort` that require a
     /// boolean "less than" comparator.
-    /// Returns true if lhs is strictly less than rhs, false otherwise.
+    /// This function does not affect the reference counts of the nodes.
+    ///
+    /// Args:
+    ///     context: Void context, unused.
+    ///     lhs: The left-hand side node for comparison.
+    ///     rhs: The right-hand side node for comparison.
+    ///
+    /// Returns:
+    ///     `true` if `lhs` is strictly less than `rhs` based on `compareNodes`, `false` otherwise.
     fn lessThanNodes(context: void, lhs: *const Node, rhs: *const Node) bool {
         return compareNodes(context, lhs, rhs) == .lt;
     }
 
-    /// Context for HashMap to use structural hashing and equality.
+    /// Provides context for `std.HashMap` to use structural hashing and equality for `*Node` keys.
+    ///
+    /// When `*Node` pointers are used as keys in a `std.HashMap`, this context ensures
+    /// that the map operates based on the logical structure of the nodes rather than
+    /// their memory addresses. Hashing is performed via `deepHashNodes` and equality
+    /// via `eqlNodes`.
     pub const NodeContext = struct {
+        /// Computes a structural hash for the given `Node`.
+        /// The hash is based on the node's type and content (recursively for complex nodes).
+        /// This function does not affect the reference count of the key.
+        ///
+        /// Args:
+        ///     _: NodeContext instance (unused).
+        ///     key: The node to hash.
+        ///
+        /// Returns:
+        ///     A u64 hash value.
         pub fn hash(_: NodeContext, key: *const Node) u64 {
             var hasher = std.hash.Wyhash.init(0);
             key.deepHashNodes(&hasher);
             return hasher.final();
         }
+
+        /// Checks for structural equality between two `Node`s.
+        /// Equality is based on the node's type and content (recursively for complex nodes).
+        /// This function does not affect the reference counts of the nodes.
+        ///
+        /// Args:
+        ///     _: NodeContext instance (unused).
+        ///     a: The first node for comparison.
+        ///     b: The second node for comparison.
+        ///
+        /// Returns:
+        ///     `true` if `a` and `b` are structurally equivalent, `false` otherwise.
         pub fn eql(_: NodeContext, a: *const Node, b: *const Node) bool {
             return a.eqlNodes(b);
         }
     };
 
-    /// Performs a structural hash of a LogicNode.
-    /// Needed for HashMap keys. Must be consistent with eqlNodes.
+    /// Performs a deep structural hash of the `Node`.
+    ///
+    /// The hash is computed based on the node's type and its content. For composite
+    /// nodes like `And`, `Or`, and `Not`, the hash includes the hashes of their children,
+    /// ensuring that structurally identical (but potentially distinct in memory) nodes
+    /// produce the same hash. This is consistent with `eqlNodes`.
+    /// This function does not affect the reference count of the node.
+    ///
+    /// Args:
+    ///     hasher: A pointer to a `std.hash.Wyhash` instance to update with the node's hash.
     pub fn deepHashNodes(self: *const Node, hasher: *std.hash.Wyhash) void {
         hasher.update(@tagName(self.logic_node));
 
@@ -282,8 +332,22 @@ pub const Node = struct {
         }
     }
 
-    /// Performs a structural comparison between two LogicNodes.
-    /// Needed for sorting and equality checks in HashMaps.
+    /// Performs a deep structural equality check between this `Node` and another.
+    ///
+    /// Two nodes are considered structurally equal if they represent the same logical
+    /// expression. This means they must be of the same type and their content
+    /// (e.g., symbol name, or child nodes for And/Or/Not) must also be structurally equal.
+    /// For `And` and `Or` nodes, the order of arguments matters for this check; canonical
+    /// sorting during node creation (e.g., in `createAnd`, `createOr`) is essential
+    /// for `eqlNodes` to correctly identify semantically equivalent but differently
+    /// ordered expressions as equal.
+    /// This function does not affect the reference counts of the nodes.
+    ///
+    /// Args:
+    ///     other: The other node to compare against.
+    ///
+    /// Returns:
+    ///     `true` if this node is structurally equivalent to `other`, `false` otherwise.
     pub fn eqlNodes(self: *const Node, other: *const Node) bool {
         const tag_a = self.logic_node;
         const tag_b = other.logic_node;
@@ -314,7 +378,16 @@ pub const Node = struct {
     }
 
     /// Converts the LogicNode to a string representation.
-    /// Allocates memory for the string using the provided allocator.
+    ///
+    /// Allocates memory for the string using the provided allocator. The caller is
+    /// responsible for freeing the returned string slice. This function does not
+    /// affect the reference count of the Node itself.
+    ///
+    /// Args:
+    ///     allocator: The allocator to use for creating the string.
+    ///
+    /// Returns:
+    ///     A newly allocated string representing the node, or an error.
     pub fn toString(self: *const Node, allocator: Allocator) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure, InvalidSyntax }![]const u8 {
         return switch (self.logic_node) {
             .True => allocator.dupe(u8, "True"),
@@ -361,16 +434,30 @@ pub const Node = struct {
         };
     }
 
-    /// Applies the distributive property: (A | B) & C -> (A & C) | (B & C).
-    /// This method is recursive and tries to push ORs up past ANDs.
-    /// For other node types (Or, Not, Symbol, True, False), it returns the node itself.
+    /// Applies the distributive property and other expansions to transform the expression,
+    /// typically towards Disjunctive Normal Form (DNF).
+    ///
+    /// The `expand` function returns a node whose reference is owned by the caller.
+    /// - If `self` is an `And` node and it is expanded (e.g., an `Or` child is distributed),
+    ///   the original `self` node is released, and a new node representing the expanded
+    ///   expression is returned. The caller owns this new node.
+    /// - If `self` is an `And` node whose children are expanded but `self` itself is not
+    ///   restructured, a new `And` node is created with the (potentially new) expanded
+    ///   children, `self` is released, and this new `And` node is returned.
+    /// - If `self` is an `And` node and no expansion occurs (neither `self` nor its children change),
+    ///   `self.acquire()` is returned.
+    /// - If `self` is not an `And` node (.Or, .Not, .Symbol, .True, .False), `self.acquire()` is returned.
+    ///
+    /// In all cases, the caller receives a node that it owns. It's recommended to always
+    /// use the returned node as the authoritative version after the call. The original `self`
+    /// reference passed to `expand` may have been consumed if a structural transformation
+    /// replaced `self`.
     ///
     /// Args:
-    ///     allocator: The allocator to use for creating new nodes.
+    ///     allocator: The allocator to use for creating new nodes during expansion.
     ///
     /// Returns:
-    ///     A pointer to the resulting LogicNode. This node is owned by the caller
-    ///     unless it is the original node or a global singleton.
+    ///     A pointer to the resulting (potentially expanded) LogicNode. The caller owns this node.
     pub fn expand(self: *const Node, allocator: Allocator) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure, InvalidSyntax }!*Node {
         return switch (self.logic_node) {
             .Or, .Not, .Symbol, .True, .False => self.acquire(),
@@ -489,6 +576,55 @@ fn freeNodeContent(allocator: Allocator, logic_node: *LogicNode) void {
     }
 }
 
+/// Performs a structural comparison between two LogicNodes for ordering.
+///
+/// Nodes are compared first by their `LogicNode` type (e.g., Symbol < Not < And < Or),
+/// then by their content (e.g., symbol names, children recursively).
+/// This function is suitable for use in sorting algorithms.
+/// This function does not affect the reference counts of the nodes.
+///
+/// Args:
+///     _: Void context, unused.
+///     a: The first node to compare.
+///     b: The second node to compare.
+///
+/// Returns:
+///     `std.math.Order.lt` if `a` is less than `b`.
+///     `std.math.Order.gt` if `a` is greater than `b`.
+///     `std.math.Order.eq` if `a` is structurally equivalent to `b`.
+pub fn compareNodes(_: void, a: *const Node, b: *const Node) Order {
+    if (a == b) return .eq;
+    const tag_order = std.math.order(@intFromEnum(a.logic_node), @intFromEnum(b.logic_node));
+
+    if (tag_order != .eq) return tag_order;
+
+    return switch (a.logic_node) {
+        .True, .False => .eq,
+        .Symbol => |s1| std.mem.order(u8, s1, b.logic_node.Symbol),
+        .Not => compareNodes({}, a.logic_node.Not, b.logic_node.Not),
+        .And => |a_and| {
+            const b_and = b.logic_node.And;
+            const len_order = std.math.order(a_and.args.len, b_and.args.len);
+            if (len_order != .eq) return len_order;
+            for (a_and.args, 0..) |arg_a, i| {
+                const arg_order = compareNodes({}, arg_a, b_and.args[i]);
+                if (arg_order != .eq) return arg_order;
+            }
+            return .eq;
+        },
+        .Or => |a_or| {
+            const b_or = b.logic_node.Or;
+            const len_order = std.math.order(a_or.args.len, b_or.args.len);
+            if (len_order != .eq) return len_order;
+            for (a_or.args, 0..) |arg_a, i| {
+                const arg_order = compareNodes({}, arg_a, b_or.args[i]);
+                if (arg_order != .eq) return arg_order;
+            }
+            return .eq;
+        },
+    };
+}
+
 /// Parses a logic expression string.
 ///
 /// Accepts a simple format like `!a & b | c` with spaces around `&` and `|`,
@@ -586,11 +722,11 @@ pub fn fromString(allocator: Allocator, text: []const u8) error{ OutOfMemory, In
 pub fn createAnd(allocator: Allocator, args: []const *Node) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure }!*Node {
     var flattened_list = std.ArrayList(*Node).init(allocator);
     defer {
-        for (flattened_list.items) |node| node.release(allocator);
+        for (flattened_list.items) |node_items| node_items.release(allocator);
         flattened_list.deinit();
     }
 
-    for (args) |arg| try flattenAndOr(allocator, arg, .{ .And = .{ .args = &.{} } }, &flattened_list);
+    for (args) |arg| try flattenAndOr(allocator, arg.acquire(), .{ .And = .{ .args = &.{} } }, &flattened_list);
 
     var unique_map = std.HashMapUnmanaged(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage){};
 
@@ -608,7 +744,7 @@ pub fn createAnd(allocator: Allocator, args: []const *Node) error{ OutOfMemory, 
             else => {},
         }
 
-        const not_arg_for_check = try createNot(allocator, arg.acquire());
+        const not_arg_for_check = try createNot(allocator, arg);
         defer not_arg_for_check.release(allocator);
 
         if (unique_map.contains(not_arg_for_check)) {
@@ -618,9 +754,8 @@ pub fn createAnd(allocator: Allocator, args: []const *Node) error{ OutOfMemory, 
             return try createFalse(allocator);
         }
 
-        if (!unique_map.contains(arg)) {
+        if (!unique_map.contains(arg))
             try unique_map.put(allocator, arg.acquire(), {});
-        }
     }
 
     var unique_args_list = std.ArrayList(*Node).init(allocator);
@@ -679,69 +814,67 @@ pub fn createOr(allocator: Allocator, args: []const *Node) error{ OutOfMemory, I
         flattened_list.deinit();
     }
 
-    for (args) |arg| try flattenAndOr(allocator, arg, .{ .Or = .{ .args = &.{} } }, &flattened_list);
+    for (args) |arg| try flattenAndOr(allocator, arg.acquire(), .{ .Or = .{ .args = &.{} } }, &flattened_list);
 
     var unique_map = std.HashMapUnmanaged(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage){};
-    defer unique_map.deinit(allocator);
 
     for (flattened_list.items) |arg| {
         switch (arg.logic_node) {
             .True => {
                 var it = unique_map.iterator();
                 while (it.next()) |entry| entry.key_ptr.*.release(allocator);
-                arg.release(allocator);
+                unique_map.deinit(allocator);
                 return try createTrue(allocator);
             },
             .False => {
-                arg.release(allocator);
                 continue;
             },
             else => {},
         }
 
-        const not_arg_for_check = try createNot(allocator, arg.acquire());
+        const not_arg_for_check = try createNot(allocator, arg);
         defer not_arg_for_check.release(allocator);
 
         if (unique_map.contains(not_arg_for_check)) {
             var it = unique_map.iterator();
             while (it.next()) |entry| entry.key_ptr.*.release(allocator);
-            arg.release(allocator);
+            unique_map.deinit(allocator);
             return try createTrue(allocator);
         }
 
-        if (!unique_map.contains(arg)) try unique_map.put(allocator, arg.acquire(), {}) else arg.release(allocator);
+        if (!unique_map.contains(arg)) try unique_map.put(allocator, arg.acquire(), {});
     }
-    flattened_list.items = &.{};
 
     var unique_args_list = std.ArrayList(*Node).init(allocator);
-    defer unique_args_list.deinit();
 
     var it = unique_map.iterator();
     while (it.next()) |entry| try unique_args_list.append(entry.key_ptr.*);
 
-    unique_map.clearAndFree(allocator);
+    unique_map.deinit(allocator);
 
-    if (unique_args_list.items.len == 0) return try createFalse(allocator);
+    if (unique_args_list.items.len == 0) {
+        unique_args_list.deinit();
+        return try createFalse(allocator);
+    }
     if (unique_args_list.items.len == 1) {
         const result = unique_args_list.items[0];
-        unique_args_list.items = &.{};
+        unique_args_list.deinit();
         return result;
     }
     std.mem.sort(*Node, unique_args_list.items, {}, Node.lessThanNodes);
 
     const final_args_slice = try allocator.dupe(*Node, unique_args_list.items);
+    unique_args_list.deinit();
+
+    const node = try allocator.create(Node);
     errdefer {
-        for (final_args_slice) |node| node.release(allocator);
+        for (final_args_slice) |node_args| node_args.release(allocator);
         allocator.free(final_args_slice);
+        allocator.destroy(node);
     }
-
-    unique_args_list.items = &.{};
-
-    const node_wrapper = try allocator.create(Node);
-    errdefer allocator.destroy(node_wrapper);
-    node_wrapper.logic_node = .{ .Or = .{ .args = final_args_slice } };
-    node_wrapper.ref_count = std.atomic.Value(usize).init(1);
-    return node_wrapper;
+    node.logic_node = .{ .Or = .{ .args = final_args_slice } };
+    node.ref_count = std.atomic.Value(usize).init(1);
+    return node;
 }
 
 /// Creates a Not node, applying simplification rules.
@@ -761,8 +894,6 @@ pub fn createOr(allocator: Allocator, args: []const *Node) error{ OutOfMemory, I
 ///     a direct reference to the original node's child (as in !!X -> X).
 ///     The caller should use recursiveFree if it determines the returned node is owned.
 pub fn createNot(allocator: Allocator, arg: *Node) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure }!*Node {
-    defer arg.release(allocator);
-
     return switch (arg.logic_node) {
         .True => return try createFalse(allocator),
         .False => return try createTrue(allocator),
@@ -772,32 +903,36 @@ pub fn createNot(allocator: Allocator, arg: *Node) error{ OutOfMemory, InvalidAr
         },
         .And => |args| {
             var new_args_list = std.ArrayList(*Node).init(allocator);
-            defer new_args_list.deinit();
-
+            defer {
+                for (new_args_list.items) |node| node.release(allocator);
+                new_args_list.deinit();
+            }
             for (args.args) |child_args| {
-                const negated_child = try createNot(allocator, child_args.acquire());
+                const negated_child = try createNot(allocator, child_args);
                 try new_args_list.append(negated_child);
             }
 
             const result_or = try createOr(allocator, new_args_list.items);
-            new_args_list.items = &.{};
             return result_or;
         },
         .Or => |args| {
             var new_and_args_list = std.ArrayList(*Node).init(allocator);
-            defer new_and_args_list.deinit();
+            defer {
+                for (new_and_args_list.items) |node| node.release(allocator);
+                new_and_args_list.deinit();
+            }
 
             for (args.args) |child_arg| {
-                const negated_node = try createNot(allocator, child_arg.acquire());
+                const negated_node = try createNot(allocator, child_arg);
                 try new_and_args_list.append(negated_node);
             }
 
             const result_and = try createAnd(allocator, new_and_args_list.items);
-            new_and_args_list.items = &.{};
             return result_and;
         },
         else => {
             const node = try allocator.create(Node);
+            errdefer allocator.destroy(node);
             node.logic_node = .{ .Not = arg.acquire() };
             node.ref_count = std.atomic.Value(usize).init(1);
             return node;
@@ -853,7 +988,7 @@ pub fn createTrue(allocator: Allocator) !*Node {
 pub fn createFalse(allocator: Allocator) !*Node {
     const node = try allocator.create(Node);
     errdefer allocator.destroy(node);
-    node.logic_node = .{ .True = {} };
+    node.logic_node = .{ .False = {} };
     node.ref_count = std.atomic.Value(usize).init(1);
     return node;
 }
