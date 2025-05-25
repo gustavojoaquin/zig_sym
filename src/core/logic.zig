@@ -458,7 +458,7 @@ pub const Node = struct {
     ///
     /// Returns:
     ///     A pointer to the resulting (potentially expanded) LogicNode. The caller owns this node.
-    pub fn expand(self: *const Node, allocator: Allocator) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure, InvalidSyntax }!*Node {
+    pub fn expand(self: *Node, allocator: Allocator) error{ OutOfMemory, InvalidArguments, CustomAllocationFailure, InvalidSyntax }!*Node {
         return switch (self.logic_node) {
             .Or, .Not, .Symbol, .True, .False => self.acquire(),
             .And => |and_node| {
@@ -477,7 +477,7 @@ pub const Node = struct {
                     if (expanded_arg != arg) any_child_expanded = true;
                     try expanded_children.append(expanded_arg);
 
-                    if (expanded_arg.* == .Or and or_node_to_distribute == null) {
+                    if (expanded_arg.logic_node == .Or and or_node_to_distribute == null) {
                         or_arg_index = expanded_children.items.len - 1;
                         or_node_to_distribute = expanded_arg;
                     }
@@ -497,7 +497,7 @@ pub const Node = struct {
                         }
                     }
 
-                    expanded_children.items = &.{};
+                    // expanded_children.items = &.{};
 
                     var distributed_or_args_list = std.ArrayList(*Node).init(allocator);
                     defer {
@@ -516,24 +516,19 @@ pub const Node = struct {
                         for (rest_arg_list.items) |rest_arg| try new_and_arg_term_list.append(rest_arg.acquire());
 
                         const new_and_node = try createAnd(allocator, new_and_arg_term_list.items);
-                        const expanded_new_and = try new_and_node.expand(allocator);
+                        const expanded_result_node = try new_and_node.expand(allocator);
 
-                        if (expanded_new_and != new_and_node) new_and_node.release(allocator);
-
-                        try distributed_or_args_list.append(expanded_new_and);
-                        new_and_arg_term_list.items = &.{};
+                        if (expanded_result_node == new_and_node) new_and_node.release(allocator);
+                        try distributed_or_args_list.append(expanded_result_node);
                     }
 
                     self.release(allocator);
-                    or_node_to_distribute_val.release(allocator);
 
-                    const final_or_node = try createOr(allocator, distributed_or_args_list);
-                    distributed_or_args_list.items = &.{};
+                    const final_or_node = try createOr(allocator, distributed_or_args_list.items);
                     return final_or_node;
                 } else if (any_child_expanded) {
                     self.release(allocator);
                     const result = try createAnd(allocator, expanded_children.items);
-                    expanded_children.items = &.{};
                     return result;
                 } else {
                     return self.acquire();
@@ -638,68 +633,94 @@ pub fn compareNodes(_: void, a: *const Node, b: *const Node) Order {
 ///     A pointer to the resulting LogicNode. The caller is responsible for freeing
 ///     this node using `freeNode`. Returns an error if parsing fails.
 pub fn fromString(allocator: Allocator, text: []const u8) error{ OutOfMemory, InvalidSyntax, CustomAllocationFailure, InvalidArguments }!*Node {
-    var tokens = std.mem.splitAny(u8, text, " &|()");
+    var current_ixd: usize = 0;
     var lexpr: ?*Node = null;
     var schedop: ?enum { And, Or } = null;
 
-    while (tokens.next()) |token| {
+    defer if (lexpr) |node| node.release(allocator);
+
+    while (current_ixd < text.len) {
+        while (current_ixd < text.len and std.ascii.isWhitespace(text[current_ixd])) current_ixd += 1;
+
+        if (current_ixd == text.len) break;
+
         var current_node: ?*Node = null;
 
-        if (eql(u8, token, "&")) {
-            if (schedop == null) return error.InvalidSyntax;
+        defer if (current_node) |node| node.release(allocator);
+
+        const char = text[current_ixd];
+        if (char == '&') {
+            current_ixd += 1;
             if (lexpr == null) return error.InvalidSyntax;
+            if (schedop != null) return error.InvalidSyntax;
             schedop = .And;
             continue;
-        } else if (eql(u8, token, "|")) {
-            if (schedop == null) return error.InvalidSyntax;
+        } else if (char == '|') {
+            current_ixd += 1;
             if (lexpr == null) return error.InvalidSyntax;
+            if (schedop != null) return error.InvalidSyntax;
             schedop = .Or;
             continue;
-        } else if (token.len > 0 and token[0] == '!') {
-            if (token.len == 1) return error.InvalidSyntax;
+        } else if (char == '!') {
+            current_ixd += 1;
             if (lexpr != null and schedop == null) return error.InvalidSyntax;
 
-            const symbol_name = token[1..];
-            const symbol_node = try createSymbol(allocator, symbol_name);
+            const start_sym_ixd = current_ixd;
+            if (current_ixd < text.len and !std.ascii.isWhitespace(text[current_ixd]) and (std.mem.indexOfScalar(u8, "&|!()", text[current_ixd]) == null)) current_ixd += 1;
 
-            const not_node = try createNot(allocator, symbol_node);
-            current_node = not_node;
+            const symbol_name = text[start_sym_ixd..current_ixd];
+            if (symbol_name.len == 0) return error.InvalidSyntax;
+
+            const temp_symbol = try createSymbol(allocator, symbol_name);
+            defer temp_symbol.release(allocator);
+            current_node = try createNot(allocator, temp_symbol);
+        } else if (std.ascii.isAlphabetic(char)) {
+            if (lexpr != null and schedop == null) return error.InvalidSyntax;
+
+            const start_sym_ixd = current_ixd;
+            if (current_ixd < text.len and !std.ascii.isWhitespace(text[current_ixd]) and (std.mem.indexOfScalar(u8, "&|!()", text[current_ixd]) == null)) current_ixd += 1;
+
+            const symbol_name = text[start_sym_ixd..current_ixd];
+            if (symbol_name.len == 0) return error.InvalidSyntax;
+
+            if (eql(u8, symbol_name, "True")) {
+                current_node = try createTrue(allocator);
+            } else if (eql(u8, symbol_name, "False")) {
+                current_node = try createFalse(allocator);
+            } else {
+                current_node = try createSymbol(allocator, symbol_name);
+            }
         } else {
-            if (lexpr != null and schedop == null) return error.InvalidSyntax;
-            const symbol_name = token;
-            const symbol_node = try createSymbol(allocator, symbol_name);
-            current_node = symbol_node;
+            return error.InvalidSyntax;
         }
 
         if (schedop) |op| {
-            if (lexpr == null or current_node == null) return error.InvalidSyntax;
+            if (lexpr == null and current_node == null) return error.InvalidSyntax;
 
-            var new_expr: *Node = undefined;
-            if (op == .And) {
-                const args_slice = [_]*Node{ lexpr.?, current_node.? };
-                new_expr = try createAnd(allocator, &args_slice);
-            } else {
-                const arg_slice = [_]*Node{ lexpr.?, current_node.? };
-                new_expr = try createOr(allocator, &arg_slice);
-            }
+            const combined_args = [_]*Node{ lexpr.?, current_node.? };
+            const new_combined_node = if (op == .And) try createAnd(allocator, &combined_args) else try createOr(allocator, &combined_args);
 
             lexpr.?.release(allocator);
             current_node.?.release(allocator);
+            current_node = null;
 
-            lexpr = new_expr;
+            lexpr = new_combined_node;
             schedop = null;
         } else {
             if (lexpr != null) return error.InvalidSyntax;
             if (current_node == null) return error.InvalidSyntax;
 
-            lexpr = current_node;
+            lexpr = current_node.?;
+            current_node = null;
         }
     }
 
-    if (schedop == null) return error.InvalidSyntax;
-    if (lexpr != null) return error.InvalidSyntax;
+    if (lexpr == null) return error.InvalidSyntax;
+    if (schedop != null) return error.InvalidSyntax;
 
-    return lexpr.?;
+    const result = lexpr.?;
+    lexpr = null;
+    return result;
 }
 
 /// Creates an And node, applying simplification and flattening rules.
@@ -863,6 +884,7 @@ pub fn createOr(allocator: Allocator, args: []const *Node) error{ OutOfMemory, I
     }
     std.mem.sort(*Node, unique_args_list.items, {}, Node.lessThanNodes);
 
+    // const final_args_slice = try allocator.dupe(*Node, unique_args_list.items);
     const final_args_slice = try allocator.dupe(*Node, unique_args_list.items);
     unique_args_list.deinit();
 

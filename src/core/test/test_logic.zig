@@ -547,3 +547,230 @@ test "test logic combine args" {
 
     try std.testing.expect(complex_or.eqlNodes(expected_or));
 }
+
+test "test logic expand" {
+    const allocator = std.testing.allocator;
+
+    const a_sym = try logic.createSymbol(allocator, "a");
+    defer a_sym.release(allocator);
+    const b_sym = try logic.createSymbol(allocator, "b");
+    defer b_sym.release(allocator);
+    const c_sym = try logic.createSymbol(allocator, "c");
+    defer c_sym.release(allocator);
+    const d_sym = try logic.createSymbol(allocator, "d");
+    defer d_sym.release(allocator);
+
+    // t = And(Or('a', 'b'), 'c')
+    const or_ab = try logic.createOr(allocator, &.{ a_sym, b_sym });
+    defer or_ab.release(allocator);
+
+    const and_t = try logic.createAnd(allocator, &.{ or_ab, c_sym });
+    defer and_t.release(allocator);
+
+    // assert t.expand() == Or(And('a', 'c'), And('b', 'c'))
+    const expanded_t = try and_t.expand(allocator);
+    defer expanded_t.release(allocator);
+
+    const and_ac = try logic.createAnd(allocator, &.{ a_sym, c_sym });
+    defer and_ac.release(allocator);
+
+    const and_bc = try logic.createAnd(allocator, &.{ b_sym, c_sym });
+    defer and_bc.release(allocator);
+
+    const expected_expanded_t = try logic.createOr(allocator, &.{ and_ac, and_bc });
+    defer expected_expanded_t.release(allocator);
+
+    try std.testing.expect(expanded_t.eqlNodes(expected_expanded_t));
+
+    // t = And(Or('a', Not('b')), 'b')
+    const b_not = try logic.createNot(allocator, b_sym);
+    defer b_not.release(allocator);
+
+    const a_not_b_or = try logic.createOr(allocator, &.{ a_sym, b_not });
+    defer a_not_b_or.release(allocator);
+
+    const a_not_b_or_b_and = try logic.createAnd(allocator, &.{ a_not_b_or, b_sym });
+    defer a_not_b_or_b_and.release(allocator);
+
+    const expanded_t2 = try a_not_b_or_b_and.expand(allocator);
+    defer expanded_t2.release(allocator);
+
+    // assert t.expand() == And('a', 'b') (simplified because (A | !B) & B -> A & B)
+    const expected_expanded_t2 = try logic.createAnd(allocator, &.{ a_sym, b_sym });
+    defer expected_expanded_t2.release(allocator);
+
+    try std.testing.expect(expanded_t2.eqlNodes(expected_expanded_t2));
+
+    // t = And(Or('a', 'b'), Or('c', 'd'))
+    const ab_or = try logic.createOr(allocator, &.{ a_sym, b_sym });
+    defer ab_or.release(allocator);
+
+    const cd_or = try logic.createOr(allocator, &.{ c_sym, d_sym });
+    defer cd_or.release(allocator);
+
+    const ab_or_cd_or_and = try logic.createAnd(allocator, &.{ ab_or, cd_or });
+    defer ab_or_cd_or_and.release(allocator);
+
+    const expected_expanded_t3 = try ab_or_cd_or_and.expand(allocator);
+    defer expected_expanded_t3.release(allocator);
+
+    // assert t.expand() == Or(And('a', 'c'), And('a', 'd'), And('b', 'c'), And('b', 'd'))
+    const ac_and = try logic.createAnd(allocator, &.{ a_sym, c_sym });
+    defer ac_and.release(allocator);
+
+    const ad_and = try logic.createAnd(allocator, &.{ a_sym, d_sym });
+    defer ad_and.release(allocator);
+
+    const bc_and = try logic.createAnd(allocator, &.{ b_sym, c_sym });
+    defer bc_and.release(allocator);
+
+    const bd_and = try logic.createAnd(allocator, &.{ b_sym, d_sym });
+    defer bd_and.release(allocator);
+
+    const expected_ac_and_ad_and_bc_and_bd_and_or = try logic.createOr(allocator, &.{ ac_and, ad_and, bc_and, bd_and });
+    defer expected_ac_and_ad_and_bc_and_bd_and_or.release(allocator);
+
+    try std.testing.expect(expected_expanded_t3.eqlNodes(expected_ac_and_ad_and_bc_and_bd_and_or));
+}
+
+test "test logic fromString" {
+    const allocator = std.testing.allocator;
+    // S('a') == 'a'
+    const node_a = try logic.fromString(allocator, "a");
+    defer node_a.release(allocator);
+
+    const expected_node_a = try logic.createSymbol(allocator, "a");
+    defer expected_node_a.release(allocator);
+
+    try std.testing.expect(node_a.eqlNodes(expected_node_a));
+
+    // S('!a') == Not('a')
+    const node_not_a = try logic.fromString(allocator, "!a");
+    defer node_not_a.release(allocator);
+
+    const not_a = try logic.createNot(allocator, node_a);
+    defer not_a.release(allocator);
+
+    try std.testing.expect(not_a.eqlNodes(node_not_a));
+
+    // S('a & b') == And('a', 'b')
+    const node_and_ab = try logic.fromString(allocator, "a & b");
+    defer node_and_ab.release(allocator);
+
+    const node_b = try logic.createSymbol(allocator, "b");
+    defer node_b.release(allocator);
+
+    const and_ab = try logic.createAnd(allocator, &.{ node_a, node_b });
+    defer and_ab.release(allocator);
+
+    try std.testing.expect(node_and_ab.eqlNodes(and_ab));
+    // S('a | b') == Or('a', 'b')
+    const node_or_ab = try logic.fromString(allocator, "a | b");
+    defer node_or_ab.release(allocator);
+
+    const or_ab = try logic.createOr(allocator, &.{ node_a, node_b });
+    defer or_ab.release(allocator);
+
+    try std.testing.expect(node_or_ab.eqlNodes(or_ab));
+
+    // S('a | b & c') == And(Or('a', 'b'), 'c') - Left to right precedence
+    const node_abc = try logic.fromString(allocator, "a | b & c");
+    defer node_abc.release(allocator);
+
+    const node_c = try logic.createSymbol(allocator, "c");
+    defer node_c.release(allocator);
+
+    const and_or_ab_c = try logic.createAnd(allocator, &.{ or_ab, node_c });
+    defer and_or_ab_c.release(allocator);
+
+    try std.testing.expect(node_abc.eqlNodes(and_or_ab_c));
+    // S('a & b | c') == Or(And('a', 'b'), 'c') - Standard precedence (AND before OR)
+    const node_and_ab_c_or = try logic.fromString(allocator, "a & b | c");
+    defer node_and_ab_c_or.release(allocator);
+
+    const or_and_ab_c = try logic.createOr(allocator, &.{ and_ab, node_c });
+    defer or_and_ab_c.release(allocator);
+
+    try std.testing.expect(node_and_ab_c_or.eqlNodes(or_and_ab_c));
+
+    // S('a & b & c') == And('a', 'b', 'c')
+    const node_and_abc = try logic.fromString(allocator, "a & b & c");
+    defer node_and_abc.release(allocator);
+
+    const and_abc = try logic.createAnd(allocator, &.{ node_a, node_b, node_c });
+    defer and_abc.release(allocator);
+
+    try std.testing.expect(node_and_abc.eqlNodes(and_abc));
+
+    // S('a | b | c') == Or('a', 'b', 'c')
+    const node_or_abc = try logic.fromString(allocator, "a | b | c");
+    defer node_or_abc.release(allocator);
+
+    const or_abc = try logic.createOr(allocator, &.{ node_a, node_b, node_c });
+    defer or_abc.release(allocator);
+
+    try std.testing.expect(node_or_abc.eqlNodes(or_abc));
+
+    // Error cases (use `await expectError` for functions that return an error union)
+    try std.testing.expectError(error.InvalidSyntax, logic.fromString(allocator, "| a"));
+    try std.testing.expectError(error.InvalidSyntax, logic.fromString(allocator, "& a"));
+    try std.testing.expectError(error.InvalidSyntax, logic.fromString(allocator, "a | | b"));
+    try std.testing.expectError(error.InvalidSyntax, logic.fromString(allocator, "a | & b"));
+    try std.testing.expectError(error.InvalidSyntax, logic.fromString(allocator, "a & & b"));
+    try std.testing.expectError(error.InvalidSyntax, logic.fromString(allocator, "a |"));
+    try std.testing.expectError(error.InvalidSyntax, logic.fromString(allocator, "!"));
+    try std.testing.expectError(error.InvalidSyntax, logic.fromString(allocator, "! a"));
+    try std.testing.expectError(error.InvalidSyntax, logic.fromString(allocator, "!(a + 1)"));
+    try std.testing.expectError(error.InvalidSyntax, logic.fromString(allocator, ""));
+}
+
+test "test logic not" {
+    const true_node = try logic.createTrue(std.testing.allocator);
+    defer true_node.release(std.testing.allocator);
+    const false_node = try logic.createFalse(std.testing.allocator);
+    defer false_node.release(std.testing.allocator);
+
+    const a_sym = try logic.createSymbol(std.testing.allocator, "a");
+    defer a_sym.release(std.testing.allocator);
+    const b_sym = try logic.createSymbol(std.testing.allocator, "b");
+    defer b_sym.release(std.testing.allocator);
+
+    // assert Not(True) == False
+    const not_true = try logic.createNot(std.testing.allocator, true_node);
+    defer not_true.release(std.testing.allocator);
+
+    try std.testing.expect(not_true.eqlNodes(false_node));
+
+    // assert Not(False) == True
+
+    const not_false = try logic.createNot(std.testing.allocator, false_node);
+    defer not_false.release(std.testing.allocator);
+
+    try std.testing.expect(not_false.eqlNodes(true_node));
+
+    // assert Not(And('a', 'b')) == Or(Not('a'), Not('b')) (De Morgan's Law)
+    const and_ab = try logic.createAnd(std.testing.allocator, &.{ a_sym, b_sym });
+    defer and_ab.release(std.testing.allocator);
+    const not_and_ab = try logic.createNot(std.testing.allocator, and_ab);
+    defer not_and_ab.release(std.testing.allocator);
+
+    const not_a = try logic.createNot(std.testing.allocator, a_sym);
+    defer not_a.release(std.testing.allocator);
+    const not_b = try logic.createNot(std.testing.allocator, b_sym);
+    defer not_b.release(std.testing.allocator);
+
+    const or_not_a_not_b = try logic.createOr(std.testing.allocator, &.{ not_a, not_b });
+    defer or_not_a_not_b.release(std.testing.allocator);
+
+    try std.testing.expect(not_and_ab.eqlNodes(or_not_a_not_b));
+    // assert Not(Or('a', 'b')) == And(Not('a'), Not('b')) (De Morgan's Law)
+    const or_ab = try logic.createOr(std.testing.allocator, &.{ a_sym, b_sym });
+    defer or_ab.release(std.testing.allocator);
+    const not_or_ab = try logic.createNot(std.testing.allocator, or_ab);
+    defer not_or_ab.release(std.testing.allocator);
+
+    const and_not_a_not_b = try logic.createAnd(std.testing.allocator, &.{ not_a, not_b });
+    defer and_not_a_not_b.release(std.testing.allocator);
+
+    try std.testing.expect(not_or_ab.eqlNodes(and_not_a_not_b));
+}
