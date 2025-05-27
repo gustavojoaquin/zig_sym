@@ -145,5 +145,54 @@ pub fn deduceAlphaImplication(allocator: Allocator, implication_list: std.ArrayL
         try combined_implications.append(.{ .from = not_to, .to = not_from });
     }
 
+    var full_implications = try transitiveClosure(allocator, combined_implications);
+    defer {
+        var it = full_implications.iterator();
+        while (it.next()) |entry| {
+            entry.key_ptr.to.release(allocator);
+            entry.key_ptr.from.release(allocator);
+        }
+        full_implications.deinit();
+    }
+
+    var res = std.HashMap(*Node, std.HashMap(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage), Node.NodeContext, std.hash_map.default_max_load_percentage).init(allocator);
+    errdefer {
+        var it = res.iterator();
+        while (it.next()) |entry| {
+            entry.key_ptr.*.release(allocator);
+            var inner_map = entry.value_ptr.*;
+            var inner_it = inner_map.iterator();
+            while (inner_it.next()) |inner_entry| {
+                inner_entry.key_ptr.*.release(allocator);
+            }
+            inner_map.deinit();
+        }
+        res.deinit();
+    }
+
+    var full_impl_it = full_implications.iterator();
+    while (full_impl_it.next()) |entry| {
+        const a = entry.key_ptr.from;
+        const b = entry.key_ptr.to;
+
+        if (a.eqlNodes(b)) continue;
+
+        var innet_set_ptr = res.getPtr(a);
+        if (innet_set_ptr == null) {
+            var new_set = std.HashMap(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage).init(allocator);
+            try new_set.put(b.acquire(), {});
+            try res.put(a.acquire(), new_set);
+        } else {
+            try innet_set_ptr.?.put(b.acquire(), {});
+        }
+    }
+
+    var res_it = res.iterator();
+    while (res_it.next()) |entry| {
+        const a = entry.key_ptr.*;
+        var impl_set = entry.value_ptr.*;
+
+
+    }
 
 }
