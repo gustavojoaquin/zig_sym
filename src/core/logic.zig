@@ -5,16 +5,6 @@ const Order = std.math.Order;
 
 const LogicError = error{ InvalidArguments, CustomAllocationFailure };
 
-fn is_newly_allocated_by_create_not(returned_node: *const LogicNode, original_arg_to_not: *const LogicNode) bool {
-    if (returned_node.* == .True or returned_node.* == .False) {
-        return false;
-    }
-    if (original_arg_to_not.* == .Not and returned_node == original_arg_to_not.Not) {
-        return false;
-    }
-    return true;
-}
-
 /// Represents a fuzzy boolean value: True, False, or Unknown (null).
 pub const FuzzyBool = ?bool;
 
