@@ -15,6 +15,11 @@ pub const FactError = error{
     LogicParsingFailed,
 };
 
+pub const BetaRule = struct {
+    condition: *Node,
+    conclusion: *Node,
+};
+
 pub const LogicPair = struct {
     atom: *Node,
     value: bool,
@@ -126,15 +131,19 @@ pub fn transitiveClosure(allocator: Allocator, initial_implications: std.ArrayLi
     return full_implications;
 }
 
-pub fn deduceAlphaImplication(allocator: Allocator, implication_list: std.ArrayList(Implication)) !std.HashMap(*Node, std.HashMap(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage), Node.NodeContext, std.hash_map.default_max_load_percentage) {
+pub fn deduceAlphaImplication(allocator: Allocator, implication_list: std.ArrayList(Implication)) !std.AutoHashMap(*Node, std.AutoHashMap(*Node, void, Node.NodeContext)) {
     var combined_implications = std.ArrayList(Implication).init(allocator);
     defer {
         for (combined_implications.items) |impl| impl.deinit(allocator);
         combined_implications.deinit();
     }
 
-    for (implication_list.items) |impl|
-        try combined_implications.append(.{ .from = impl.from.acquire(), .to = impl.to.acquire() });
+    for (implication_list.items) |impl| {
+        try combined_implications.append(.{
+            .from = impl.from.acquire(),
+            .to = impl.to.acquire(),
+        });
+    }
 
     for (implication_list.items) |impl| {
         const not_to = try logic.createNot(allocator, impl.to);
@@ -142,57 +151,102 @@ pub fn deduceAlphaImplication(allocator: Allocator, implication_list: std.ArrayL
         const not_from = try logic.createNot(allocator, impl.from);
         defer not_from.release(allocator);
 
-        try combined_implications.append(.{ .from = not_to, .to = not_from });
+        try combined_implications.append(.{
+            .from = not_to.acquire(),
+            .to = not_from.acquire(),
+        });
     }
 
     var full_implications = try transitiveClosure(allocator, combined_implications);
     defer {
         var it = full_implications.iterator();
         while (it.next()) |entry| {
-            entry.key_ptr.to.release(allocator);
-            entry.key_ptr.from.release(allocator);
+            const key = entry.key_ptr.*;
+            key.from.release(allocator);
+            key.to.release(allocator);
         }
         full_implications.deinit();
     }
 
-    var res = std.HashMap(*Node, std.HashMap(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage), Node.NodeContext, std.hash_map.default_max_load_percentage).init(allocator);
+    var res = std.AutoHashMap(*Node, std.AutoHashMap(*Node, void, Node.NodeContext)).init(allocator);
     errdefer {
-        var it = res.iterator();
-        while (it.next()) |entry| {
+        var res_iter = res.iterator();
+        while (res_iter.next()) |entry| {
             entry.key_ptr.*.release(allocator);
-            var inner_map = entry.value_ptr.*;
-            var inner_it = inner_map.iterator();
-            while (inner_it.next()) |inner_entry| {
-                inner_entry.key_ptr.*.release(allocator);
+            var inner = entry.value_ptr.*;
+            var inner_iter = inner.keyIterator();
+            while (inner_iter.next()) |key| {
+                key.*.release(allocator);
             }
-            inner_map.deinit();
+            inner.deinit();
         }
         res.deinit();
     }
 
-    var full_impl_it = full_implications.iterator();
-    while (full_impl_it.next()) |entry| {
-        const a = entry.key_ptr.from;
-        const b = entry.key_ptr.to;
+    var it = full_implications.iterator();
+    while (it.next()) |entry| {
+        const impl = entry.key_ptr.*;
+        const a = impl.from;
+        const b = impl.to;
 
         if (a.eqlNodes(b)) continue;
 
-        var innet_set_ptr = res.getPtr(a);
-        if (innet_set_ptr == null) {
-            var new_set = std.HashMap(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage).init(allocator);
-            try new_set.put(b.acquire(), {});
-            try res.put(a.acquire(), new_set);
-        } else {
-            try innet_set_ptr.?.put(b.acquire(), {});
+        var inner_map = res.getPtr(a) orelse blk: {
+            const new_inner = std.AutoHashMap(*Node, void, Node.NodeContext).init(allocator);
+            try res.put(a.acquire(), new_inner);
+            break :blk res.getPtr(a).?;
+        };
+
+        try inner_map.put(b.acquire(), {});
+    }
+
+    var res_iter = res.iterator();
+    while (res_iter.next()) |entry| {
+        const a = entry.key_ptr.*;
+        var inner_map = entry.value_ptr;
+
+        if (inner_map.remove(a)) {
+            a.release(allocator);
+        }
+
+        const na = try logic.createNot(allocator, a);
+        defer na.release(allocator);
+
+        if (inner_map.contains(na)) {
+            return FactError.InconsistentImplications;
         }
     }
 
-    var res_it = res.iterator();
-    while (res_it.next()) |entry| {
-        const a = entry.key_ptr.*;
-        var impl_set = entry.value_ptr.*;
+    return res;
+}
 
-
+pub fn applyBetaToAlphaRoute(
+    allocator: Allocator,
+    alpha_implications: *const std.AutoHashMap(*Node, std.AutoHashMap(*Node, void)),
+    beta_rules: []const BetaRule,
+) !std.AutoHashMap(*Node, struct {
+    implications: std.AutoHashMap(*Node, void),
+    beta_indices: std.ArrayList(usize),
+}) {
+    // Initialize the result map
+    var x_impl = std.AutoHashMap(*Node, struct {
+        implications: std.AutoHashMap(*Node, void),
+        beta_indices: std.ArrayList(usize),
+    }).init(allocator);
+    errdefer {
+        var iter = x_impl.iterator();
+        while (iter.next()) |entry| {
+            entry.key_ptr.*.release(allocator);
+            entry.value_ptr.implications.deinit();
+            entry.value_ptr.beta_indices.deinit();
+        }
+        x_impl.deinit();
     }
 
+    var all_facts = std.AutoHashMap(*Node, void, Node.NodeContext).init(allocator);
+    defer {
+        var iter = all_facts.keyIterator();
+        while (iter.next()) |key| key.*.release(allocator);
+        all_facts.deinit();
+    }
 }
