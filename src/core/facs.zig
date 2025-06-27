@@ -249,4 +249,91 @@ pub fn applyBetaToAlphaRoute(
         while (iter.next()) |key| key.*.release(allocator);
         all_facts.deinit();
     }
+
+    var alpha_iter = alpha_implications.keyIterator();
+    while (alpha_iter.next()) |key| {
+        try all_facts.put(key.*.acquire(), .{});
+    }
+
+    for (beta_rules) |rules| {
+        if (rules.condition.logic_node != .And) {
+            return FactError.NotAnAndCondition;
+        }
+
+        for (rules.condition.logic_node.And.args) |arg| {
+            try all_facts.put(arg.acquire(), .{});
+        }
+    }
+
+    var facts_iter = all_facts.keyIterator();
+    while (facts_iter.next()) |fact_ptr| {
+        const fact = fact_ptr.*;
+        var implications = std.AutoHashMap(*Node, void, Node.NodeContext).init(allocator);
+        errdefer implications.deinit();
+
+        var beta_indices = std.ArrayList(usize).init(allocator);
+        errdefer beta_indices.deinit();
+
+        if (alpha_implications.get(fact)) |alpha_impl| {
+            var impl_iter = alpha_impl.keyIterator();
+            while (impl_iter.next()) |impl| {
+                try implications.put(impl.*.acquire(), {});
+            }
+        }
+
+        try x_impl.put(fact.acquire(), .{
+            .implications = implications,
+            .beta_indices = beta_indices,
+        });
+    }
+
+    var changed = true;
+    while (changed) {
+        changed = false;
+
+        for (beta_rules, 0..) |rule, rule_idx| {
+            _ = rule_idx;
+            const bcond = rule.condition;
+            const bimpl = rule.conclusion;
+
+            if (bcond.logic_node != .And) {
+                return FactError.NotAnAndCondition;
+            }
+            const bargs = bcond.logic_node.And.args;
+
+            var x_impl_iter = x_impl.iterator();
+            while (x_impl_iter.next()) |entry| {
+                const x = entry.key_ptr.*;
+                const x_data = entry.value_ptr;
+                const ximpls = &x_data.implications;
+
+                if (ximpls.contains(bimpl) or x.eqlNodes(bimpl)) {
+                    continue;
+                }
+
+                var all_satisfied = true;
+                for (bargs) |barg| {
+                    if (!x.eqlNodes(barg) and !ximpls.contains(barg)) {
+                        all_satisfied = false;
+                        break;
+                    }
+                }
+
+                if (all_satisfied) {
+                    try ximpls.put(bimpl.acquire(), {});
+                    changed = true;
+
+                    if (x_impl.get(bimpl)) |bimpl_data| {
+                        var bimpl_iter = bimpl_data.implications.keyIterator();
+                        while (bimpl_iter.next()) |impl| {
+                            if (!ximpls.contains(impl.*)) {
+                                try ximpls.put(impl.*.acquire(), {});
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
