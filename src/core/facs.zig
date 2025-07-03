@@ -337,3 +337,37 @@ pub fn applyBetaToAlphaRoute(
         }
     }
 }
+
+pub fn rulesToPrereq(
+    allocator: Allocator,
+    rules: *const std.HashMap(LogicPair, std.HashMap(LogicPair, void, LogicPair.Context, std.hash_map.default_max_load_percentage), LogicPair.Context, std.hash_map.default_max_load_percentage),
+) !std.AutoHashMap(*Node, std.HashMap(*Node, void, Node.NodeContext), Node.NodeContext, std.hash_map.default_max_load_percentage) {
+    var prereq = std.HashMap(*Node, std.HashMap(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage), Node.NodeContext, std.hash_map.default_max_load_percentage).init(allocator);
+    errdefer prereq.deinit();
+
+    var rules_iter = rules.iterator();
+    while (rules_iter.next()) |rules_entry| {
+        const key_pair = rules_entry.key_ptr.*;
+        const implications = rules_entry.value_ptr;
+
+        const base_key = baseFact(key_pair.atom);
+        defer if (base_key != key_pair.atom) base_key.release(allocator);
+
+        var impl_iter = implications.keyIterator();
+        while (impl_iter.next()) |impl| {
+            const base_impl = baseFact(impl.atom);
+            defer if (base_impl != impl.atom) base_impl.release(allocator);
+
+            if (base_key.eqlNodes(base_impl)) continue;
+
+            var inner_map = try prereq.getOrPut(base_impl);
+            if (!inner_map.found_existing) {
+                inner_map.key_ptr.* = base_impl.acquire();
+                inner_map.value_ptr.* = std.HashMap(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage).init(allocator);
+            }
+
+            try inner_map.value_ptr.put(base_key.acquire(), .{});
+        }
+    }
+    return prereq;
+}
