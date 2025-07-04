@@ -371,3 +371,22 @@ pub fn rulesToPrereq(
     }
     return prereq;
 }
+
+pub const FactRules = struct {
+    allocator: Allocator,
+    full_implications: std.HashMap(LogicPair, std.HashMap(LogicPair, void, LogicPair.Context, std.hash_map.default_max_load_percentage), LogicPair.Context, std.hash_map.default_max_load_percentage),
+    beta_rules: std.ArrayList(struct {
+        condition: std.HashMap(LogicPair, void, LogicPair.Context, std.hash_map.default_max_load_percentage),
+        conclusion: LogicPair,
+    }),
+    beta_triggers: std.HashMap(LogicPair, std.ArrayList(usize), LogicPair.Context, std.hash_map.default_max_load_percentage),
+    prereq: std.HashMap(*Node, std.HashMap(*Node, void, Node.NodeContext), Node.NodeContext, std.hash_map.default_max_load_percentage),
+    defined_facts: std.HashMap(*Node, void, Node.NodeContext, std.hash_map.default_max_load_percentage),
+
+    pub fn compile(allocator: Allocator, alpha_rules: *const std.ArrayList(Implication), beta_rules_raw: []const BetaRule) !FactRules {
+        var self: FactRules = undefined;
+        self.allocator = allocator;
+        self.full_implications = std.HashMap(LogicPair, std.HashMap(LogicPair, void, LogicPair.Context, std.hash_map.default_max_load_percentage), LogicPair.Context, std.hash_map.default_max_load_percentage).init(allocator);
+        errdefer self.full_implications.deinit();
+    }
+};
